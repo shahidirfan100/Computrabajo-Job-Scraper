@@ -9,7 +9,7 @@ import {
     log,
     RequestQueue,
 } from 'crawlee';
-import cheerio from 'cheerio';
+import { load as cheerioLoad } from 'cheerio';
 
 // -------------------- Helpers --------------------
 
@@ -27,7 +27,7 @@ const pickFirstNonEmpty = (...vals) => {
 
 const cleanHtmlToText = (html) => {
     if (!html) return null;
-    const $ = cheerio.load(html);
+    const $ = cheerioLoad(html);
     $('script, style, noscript, iframe, form, button, svg').remove();
     return normText($.root().text());
 };
@@ -37,7 +37,7 @@ const stripAttrsKeepTags = (
     allowedTags = ['p', 'br', 'ul', 'ol', 'li', 'strong', 'em', 'b', 'i', 'a', 'h3', 'h4'],
 ) => {
     if (!html) return '';
-    const $ = cheerio.load(html, { decodeEntities: true });
+    const $ = cheerioLoad(html, { decodeEntities: true });
 
     // Remove non-content & hidden elements
     $('script, style, noscript, iframe, form, button, svg, input, textarea, select').remove();
@@ -441,13 +441,12 @@ await Actor.main(async () => {
             },
         ],
 
-        // If a request fails too many times, retire session (likely flagged)
+        // Retire session if a request fails repeatedly (likely flagged)
         failedRequestHandler: async ({ request, error, session }) => {
             log.warning(`Request failed: ${request.url} :: ${error?.message || error}`);
             if (session) session.retire();
         },
 
-        additionalMimeTypes: ['text/html', 'application/xhtml+xml'],
         requestHandlerTimeoutSecs,
         maxRequestRetries,
     });
