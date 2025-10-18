@@ -26,9 +26,9 @@ async function main() {
 
         // Internal defaults (not exposed in schema)
         const stealthMode = true;
-        const minRequestDelay = 1500;  // Increased from 500 to avoid 403 errors
-        const maxRequestDelay = 4000;  // Increased from 1500 to avoid 403 errors
-        const MAX_CONCURRENCY = 2;     // Reduced from 3 for extra stealth
+        const minRequestDelay = 500;
+        const maxRequestDelay = 1500;
+        const MAX_CONCURRENCY = 3;
 
         const MAX_RESULTS = Math.max(1, Math.floor(Number(results_wanted) || 50));
         const MAX_PAGES = Math.max(1, Math.floor(Number(max_pages) || 10));
@@ -73,15 +73,11 @@ async function main() {
         const cleanHtmlToText = (html) => {
             if (!html) return '';
             const $ = cheerioLoad(html);
-            $('script, style, noscript, [class*="animating"], [class*="hide"], [id*="complaint"], [data-complaint-overlay]').remove();
-            let text = $.root().text().replace(/\s+/g, ' ').trim();
-            // Remove common error/popup patterns
-            text = text.replace(/Error al realizar.*?minutos\./gi, '');
-            text = text.replace(/Por qué quieres reportar.*?privacidad/gi, '');
-            text = text.replace(/Gracias por tu denuncia.*?empresa\./gi, '');
-            text = text.replace(/¿Por qué quieres reportar.*?elecci[óo]n/gi, '');
-            return text.replace(/\s+/g, ' ').trim();
-        };        const buildSearchUrl = (searchKeyword) => {
+            $('script, style, noscript').remove();
+            return $.root().text().replace(/\s+/g, ' ').trim();
+        };
+
+        const buildSearchUrl = (searchKeyword) => {
             if (!searchKeyword || typeof searchKeyword !== 'string') {
                 return 'https://mx.computrabajo.com/trabajo-de-asesor-de-ventas';
             }
@@ -90,12 +86,17 @@ async function main() {
             return `https://mx.computrabajo.com/trabajo-de-${normalized}`;
         };
 
-        // Initialize URLs (priority: startUrl > built keyword URL)
+        // Initialize URLs (priority: startUrl > startUrlsText > startUrls array > built keyword URL)
         const initialUrls = [];
         if (typeof startUrl === 'string' && startUrl.trim().length > 0) {
             initialUrls.push(startUrl.trim());
-        } else {
-            // For now build URL from keyword; location and posted_date are informational inputs
+        } else if (typeof startUrlsText === 'string' && startUrlsText.trim().length > 0) {
+            const parsed = startUrlsText.split(/[\r\n]+/).map(s => s.trim()).filter(Boolean);
+            initialUrls.push(...parsed);
+        } else if (Array.isArray(startUrls) && startUrls.length > 0) {
+            initialUrls.push(...startUrls.filter(u => typeof u === 'string' && u.length > 0));
+        }
+        if (initialUrls.length === 0) {
             initialUrls.push(buildSearchUrl(keyword));
         }
 
@@ -131,25 +132,13 @@ async function main() {
                 for (const item of items) {
                     const itemType = item['@type'] || item.type;
                     if (itemType === 'JobPosting' || (Array.isArray(itemType) && itemType.includes('JobPosting'))) {
-                        // Extract salary range (baseSalary can be object with currency, value, unitText)
-                        let salary = null;
-                        if (item.baseSalary) {
-                            if (typeof item.baseSalary === 'string') {
-                                salary = item.baseSalary;
-                            } else if (item.baseSalary.currency && item.baseSalary.value) {
-                                salary = `${item.baseSalary.currency} ${item.baseSalary.value}`;
-                            } else if (item.baseSalary.value) {
-                                salary = String(item.baseSalary.value);
-                            }
-                        }
-                        
                         return {
                             title: item.title || item.name || null,
                             company: item.hiringOrganization?.name || null,
                             datePosted: item.datePosted || null,
                             description: item.description || null,
                             location: item.jobLocation?.address?.addressLocality || item.jobLocation?.address?.addressRegion || null,
-                            salary: salary,
+                            salary: item.baseSalary?.value || null,
                             employmentType: item.employmentType || null,
                         };
                     }
@@ -187,67 +176,53 @@ async function main() {
             return null;
         }
 
-        // Extract job detail data - prioritize JSON-LD only (most reliable)
+        // Extract job detail data
         function extractJobDetail($, jobUrl) {
             const jsonLd = extractJsonLd($) || {};
 
-            // Use JSON-LD exclusively; it's structured and reliable
-            // Fallback to null if not available to avoid picking up permission prompts, modals, etc.
-            const title = jsonLd.title || null;
-            const company = jsonLd.company || null;
-            const location = jsonLd.location || null;
-            const salary = jsonLd.salary || null;
-            const employmentType = jsonLd.employmentType || null;
-            const datePosted = jsonLd.datePosted || null;
-            const description = jsonLd.description || null;
+            // Fallback selectors for each field
+            const title = jsonLd.title || $('h1, .box_title h1, [class*="title"]').first().text().trim() || null;
+            const company = jsonLd.company 
+                || $('.fc_base a, [class*="company"]').first().text().trim() 
+                || null;
+            const location = jsonLd.location 
+                || $('.box_header p, [class*="location"]').first().text().trim()
+                || null;
+
+            let description = jsonLd.description;
+            if (!description) {
+                const descEl = $('.box_detail, [class*="job-description"], .job_desc').first();
+                description = descEl.length ? descEl.html() : null;
+            }
 
             return {
                 title,
                 company,
                 location,
-                salary,
-                employmentType,
-                datePosted,
                 description_html: description,
                 description_text: description ? cleanHtmlToText(description) : null,
                 url: jobUrl,
+                datePosted: jsonLd.datePosted || null,
+                salary: jsonLd.salary || null,
+                employmentType: jsonLd.employmentType || null,
                 source: 'computrabajo.com',
             };
         }
 
 
-        // Helper to build per-request headers with anti-bot measures
-        const buildHeaders = (referer = 'https://mx.computrabajo.com/') => {
-            const headers = {
-                'User-Agent': getRandomUserAgent(),
-                'Accept-Language': getRandomAcceptLang(),
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Cache-Control': 'no-cache',
-                'Pragma': 'no-cache',
-                'DNT': '1',
-                'Upgrade-Insecure-Requests': '1',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Sec-Fetch-User': '?1',
-                'Referer': referer,
-            };
-            // Attach cookies if provided (raw or parsed)
-            if (typeof cookies === 'string' && cookies.trim().length > 0) {
-                headers['Cookie'] = cookies.trim();
-            } else if (parsedCookies) {
-                try {
-                    if (Array.isArray(parsedCookies)) {
-                        headers['Cookie'] = parsedCookies.map(c => `${c.name}=${c.value}`).join('; ');
-                    } else if (typeof parsedCookies === 'object') {
-                        headers['Cookie'] = Object.entries(parsedCookies).map(([k, v]) => `${k}=${v}`).join('; ');
-                    }
-                } catch (e) { /* ignore */ }
-            }
-            return headers;
-        };
-        
+        // Helper to build per-request headers
+        const buildHeaders = () => ({
+            'User-Agent': getRandomUserAgent(),
+            'Accept-Language': getRandomAcceptLang(),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Encoding': 'gzip, deflate',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+        });
 
         const crawler = new CheerioCrawler({
             proxyConfiguration: proxyConfig,
@@ -282,7 +257,7 @@ async function main() {
                                     urls: toQueue,
                                     userData: { label: 'DETAIL' },
                                     transformRequestFunction: (req) => {
-                                        req.headers = { ...(req.headers || {}), ...buildHeaders(request.url) };
+                                        req.headers = { ...(req.headers || {}), ...buildHeaders() };
                                         if (stealthMode && totalSaved > 0) {
                                             const delay = getStealthDelay();
                                             if (delay > 0) return new Promise(res => setTimeout(() => res(req), delay));
@@ -308,7 +283,7 @@ async function main() {
                                     urls: [nextUrl],
                                     userData: { label: 'LIST', pageNum: pageNum + 1 },
                                     transformRequestFunction: (req) => {
-                                        req.headers = { ...(req.headers || {}), ...buildHeaders(request.url) };
+                                        req.headers = { ...(req.headers || {}), ...buildHeaders() };
                                         return req;
                                     }
                                 });
@@ -336,14 +311,7 @@ async function main() {
                 }
             },
             errorHandler: async ({ request, error, log: logger }) => {
-                // Handle 403 gracefully (site blocking/rate limiting)
-                if (error.message && error.message.includes('403')) {
-                    logger.warning(`[403 Blocked] ${request.url} - Computrabajo blocked this request. Sleeping before retry.`);
-                    // Small delay before potential retry
-                    await new Promise(r => setTimeout(r, 2000 + Math.random() * 3000));
-                } else {
-                    logger.warning(`Failed: ${request.url} - ${error.message}`);
-                }
+                logger.warning(`Failed: ${request.url} - ${error.message}`);
             },
         });
 
@@ -354,7 +322,7 @@ async function main() {
         const initialRequests = initialUrls.map(url => ({
             url,
             userData: { label: 'LIST', pageNum: 1 },
-            headers: buildHeaders('https://mx.computrabajo.com/'),
+            headers: buildHeaders(),
         }));
 
         await crawler.run(initialRequests);
