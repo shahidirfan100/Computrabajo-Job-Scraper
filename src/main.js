@@ -1,5 +1,6 @@
 // src/main.js (ESM)
 // Apify SDK + Crawlee (CheerioCrawler) + gotScraping (HTTP-based), ESM compatible.
+// Robust start URL parsing + proxy/sessions + resilient extractors.
 
 import { Actor } from 'apify';
 import {
@@ -11,7 +12,7 @@ import {
 } from 'crawlee';
 import { load as cheerioLoad } from 'cheerio';
 
-// -------------------- Helpers --------------------
+// -------------------- Helpers: text utils --------------------
 
 const normText = (s) => (s || '').replace(/\u00A0/g, ' ').replace(/\s+/g, ' ').trim();
 
@@ -67,13 +68,14 @@ const stripAttrsKeepTags = (
     return out.replace(/\s+\n/g, '\n').trim();
 };
 
-// Parse Spanish relative dates like "Publicado hace 2 días", "hace una hora", or ISO-looking strings.
+// -------------------- Helpers: parsing fields --------------------
+
 const parseSpanishRelativeDateToISO = (s) => {
     const str = (s || '').toLowerCase();
     if (!str) return null;
     const now = new Date();
 
-    // Try direct ISO first
+    // Direct ISO-leaning first
     const iso = str.match(/\d{4}-\d{2}-\d{2}(?:[ t]\d{2}:\d{2}(?::\d{2})?)?/);
     if (iso) {
         const d = new Date(iso[0]);
@@ -334,13 +336,62 @@ const extractJobDetail = ($, url) => {
         job.salary_text = salary_text;
     }
 
-    // Guard against CSS-only capture (rare fallback)
+    // Guard: CSS-only
     if (job.description_html && /{.*}/.test(job.description_html) && !/<(p|ul|li|a|strong|em|br|h3|h4)/i.test(job.description_html)) {
         job.description_html = null;
         job.description_text = null;
     }
 
     return job;
+};
+
+// -------------------- Start URL normalization --------------------
+
+/**
+ * Accept a wide variety of inputs:
+ * - { startUrls: [{ url }, ...] }
+ * - { startUrls: ["https://...", ...] }
+ * - { startUrl: "https://..." }
+ * - { urls: ["https://...", ...] } or { urls: "https://...\nhttps://..." }
+ * - { requests: [{ url }, ...] } or { requests: ["https://...", ...] }
+ */
+const normalizeStartRequests = (input) => {
+    const out = [];
+
+    const pushUrl = (u) => {
+        const url = String(u || '').trim();
+        if (!url) return;
+        try {
+            // Validate URL format
+            const _ = new URL(url);
+            out.push({ url });
+        } catch {
+            // ignore invalid
+        }
+    };
+
+    const pushMaybeArray = (val) => {
+        if (!val) return;
+        if (Array.isArray(val)) {
+            for (const item of val) {
+                if (typeof item === 'string') pushUrl(item);
+                else if (item && typeof item === 'object' && item.url) pushUrl(item.url);
+            }
+        } else if (typeof val === 'string') {
+            // Support newline or comma separated
+            val.split(/\r?\n|,/).forEach(pushUrl);
+        } else if (val && typeof val === 'object' && val.url) {
+            pushUrl(val.url);
+        }
+    };
+
+    pushMaybeArray(input.startUrls);
+    pushMaybeArray(input.startUrl);
+    pushMaybeArray(input.urls);
+    pushMaybeArray(input.requests);
+    pushMaybeArray(input.sources);
+
+    return out;
 };
 
 // -------------------- Router --------------------
@@ -368,6 +419,8 @@ router.addDefaultHandler(async ({ $, request, log, enqueueLinks }) => {
             'a[href*="/job/"]',
             'a.js-o-link',
             'a[href*="/empleo/"]',
+            // a touch broader, but still safe for Computrabajo:
+            'a[href*="/trabajo-"]',
         ].join(','),
         label: 'DETAIL',
         transformRequestFunction: (req) => {
@@ -399,7 +452,6 @@ router.addHandler('DETAIL', async ({ $, request, log }) => {
 await Actor.main(async () => {
     const input = await Actor.getInput() || {};
     const {
-        startUrls = [],
         maxRequestsPerCrawl = 1000,
         maxConcurrency = 10,
         proxy = { useApifyProxy: true }, // set groups in input if needed
@@ -407,15 +459,21 @@ await Actor.main(async () => {
         maxRequestRetries = 2,
     } = input;
 
+    // Normalize & validate start requests
+    const startRequests = normalizeStartRequests(input);
+    log.info(`Loaded ${startRequests.length} start URL(s).`);
+    if (startRequests.length === 0) {
+        throw new Error('No valid start URLs found in input.\nProvide startUrls (array of {url} or strings), or startUrl/urls/requests.');
+    }
+
     // Proxy rotation
     const proxyConfiguration = await Actor.createProxyConfiguration(proxy);
 
+    // Queue & seed requests
     const requestQueue = await RequestQueue.open();
-    for (const s of startUrls) {
-        if (!s || !s.url) continue;
-        await requestQueue.addRequest({ url: s.url });
-    }
+    for (const r of startRequests) await requestQueue.addRequest(r);
 
+    // Crawler
     const crawler = new CheerioCrawler({
         requestQueue,
         maxRequestsPerCrawl,
@@ -423,7 +481,6 @@ await Actor.main(async () => {
         requestHandler: router,
         proxyConfiguration,
 
-        // Sessions = persistent cookies per session; auto-rotation on blocks
         useSessionPool: true,
         persistCookiesPerSession: true,
         sessionPoolOptions: {
@@ -431,7 +488,7 @@ await Actor.main(async () => {
             sessionOptions: { maxRequestRetries },
         },
 
-        // Tweak request headers a bit for stealth
+        // Gentle header tweaks; Crawlee/gotScraping already does a lot
         preNavigationHooks: [
             async ({ request }) => {
                 request.headers['accept-language'] = request.headers['accept-language'] || 'es-ES,es;q=0.9,en;q=0.8';
@@ -441,7 +498,6 @@ await Actor.main(async () => {
             },
         ],
 
-        // Retire session if a request fails repeatedly (likely flagged)
         failedRequestHandler: async ({ request, error, session }) => {
             log.warning(`Request failed: ${request.url} :: ${error?.message || error}`);
             if (session) session.retire();
