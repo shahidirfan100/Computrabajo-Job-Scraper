@@ -13,6 +13,7 @@ async function main() {
         const input = (await Actor.getInput()) || {};
         const {
             startUrls = [],
+            startUrlsText = '',
             keyword = 'asesor-de-ventas',
             maxResults: MAX_RESULTS_RAW = 100,
             maxPages: MAX_PAGES_RAW = 20,
@@ -79,9 +80,12 @@ async function main() {
             return `https://mx.computrabajo.com/trabajo-de-${normalized}`;
         };
 
-        // Initialize URLs
+        // Initialize URLs (priority: startUrlsText > startUrls array > built keyword URL)
         const initialUrls = [];
-        if (Array.isArray(startUrls) && startUrls.length > 0) {
+        if (typeof startUrlsText === 'string' && startUrlsText.trim().length > 0) {
+            const parsed = startUrlsText.split(/[\r\n]+/).map(s => s.trim()).filter(Boolean);
+            initialUrls.push(...parsed);
+        } else if (Array.isArray(startUrls) && startUrls.length > 0) {
             initialUrls.push(...startUrls.filter(u => typeof u === 'string' && u.length > 0));
         }
         if (initialUrls.length === 0) {
@@ -195,8 +199,6 @@ async function main() {
             maxConcurrency: MAX_CONCURRENCY,
             minConcurrency: Math.max(1, Math.floor(MAX_CONCURRENCY / 2)),
             requestHandlerTimeoutSecs: 60,
-            handlePageTimeoutSecs: 90,
-            navigationTimeoutSecs: 30,
             ignoreSslErrors: true,
             prepareRequest: async ({ request }) => {
                 // Add stealth headers

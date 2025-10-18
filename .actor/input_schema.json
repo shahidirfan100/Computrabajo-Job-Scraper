@@ -18,6 +18,12 @@
       "editor": "textfield",
       "prefill": "asesor-de-ventas"
     },
+    "startUrlsText": {
+      "title": "Start URLs (paste newline-separated)",
+      "type": "string",
+      "description": "Optional: paste one URL per line. This takes precedence over the `startUrls` select. Useful for free-form lists.",
+      "editor": "textarea"
+    },
     "maxResults": {
       "title": "Maximum Results",
       "type": "integer",
