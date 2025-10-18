@@ -1,5 +1,7 @@
 // src/main.js (ESM)
 // Apify SDK + Crawlee (CheerioCrawler) + gotScraping (HTTP-based), ESM compatible.
+// Includes: proxy rotation, session pool, robust start URL parsing, and resilient extractors
+// for company, location, datePosted, employmentType, salary, description_html/text.
 
 import { Actor } from 'apify';
 import {
@@ -192,31 +194,130 @@ const parseAllJsonLd = ($) => {
     return jobPostings[0] || null;
 };
 
-// Description extraction with sanitization
-const extractDescription = ($) => {
+// -------------------- Hardened company / location / description helpers --------------------
+
+// Company cleanup: keep only the clean name, drop ratings, popups, and legalese
+const cleanCompanyName = (raw) => {
+    let s = normText(raw);
+    if (!s) return null;
+
+    const STOP_TOKENS = [
+        'seguir', 'volver', 'información básica', 'política de privacidad',
+        'responsable', 'finalidad', 'legitimación', 'destinatarios', 'derechos',
+        '¡no te pierdas', 'recibe notificaciones', 'formato incorrecto', 'contraseña incorrecta',
+        'acepto las condiciones', 'ver detalle legal',
+    ];
+
+    s = s.split('\n')[0].split('|')[0].split('·')[0];
+    s = s.replace(/\b\d[\d.,]{0,3}\b/g, '').trim();
+
+    for (const tok of STOP_TOKENS) {
+        const idx = s.toLowerCase().indexOf(tok);
+        if (idx > 0) {
+            s = s.slice(0, idx).trim();
+        }
+    }
+
+    s = s.replace(/[•·|]+$/g, '').replace(/\s{2,}/g, ' ').trim();
+    if (s.length > 80) s = s.slice(0, 80).trim();
+
+    return s || null;
+};
+
+// Spanish-first DOM company selectors
+const pickCompanyFromDom = ($) => {
+    // Schema.org / microdata
+    let c =
+        $('[itemprop="hiringOrganization"] [itemprop="name"]').first().text() ||
+        $('[itemscope][itemtype*="Organization"] [itemprop="name"]').first().text();
+    if ((c = cleanCompanyName(c))) return c;
+
+    // Empresa profile links / anchors
     const candidates = [
+        'a[href*="/empresas/"]',
+        'a[href*="/empresa/"]',
+        '.box_header a[href*="/empresa"]',
+        'a:contains("Ver más sobre la empresa")',
+        'a:contains("Ver más sobre la compañía")',
+    ];
+    for (const sel of candidates) {
+        const t = $(sel).first().text();
+        const cleaned = cleanCompanyName(t);
+        if (cleaned) return cleaned;
+    }
+
+    // Header near rating (as fallback)
+    {
+        const t = $('.box_header .fc_base, .box_header .fc_base a, .box_header .fc_base span')
+            .first().text();
+        const cleaned = cleanCompanyName(t);
+        if (cleaned) return cleaned;
+    }
+
+    {
+        const t = $('.box_header a, .box_company a, [class*="company"] a').first().text();
+        const cleaned = cleanCompanyName(t);
+        if (cleaned) return cleaned;
+    }
+
+    return null;
+};
+
+// Safer location extraction: microdata first, then chips, then cleaned fallback
+const pickLocation = ($, fallbackText) => {
+    const locality = $('[itemprop="jobLocation"] [itemprop="addressLocality"]').first().text();
+    const region   = $('[itemprop="jobLocation"] [itemprop="addressRegion"]').first().text();
+    const country  = $('[itemprop="jobLocation"] [itemprop="addressCountry"]').first().text();
+    const parts = [locality, region, country].map(normText).filter(Boolean);
+    if (parts.length) return parts.join(', ');
+
+    const chip = extractLabeledValue($, [/ubicaci[oó]n/i, /ciudad/i, /estado/i, /localidad/i]);
+    let loc = pickFirstNonEmpty(chip, fallbackText);
+    if (!loc) return null;
+
+    loc = loc
+        .replace(/Publicado.*$/i, '')
+        .replace(/Postular.*/i, '')
+        .replace(/Ver detalle legal.*/i, '')
+        .replace(/\s{2,}/g, ' ')
+        .trim();
+
+    loc = loc.split('|')[0].split('·')[0].trim();
+    if (loc.length > 120) loc = loc.slice(0, 120).trim();
+    return loc || null;
+};
+
+// Description extraction (Spanish-first) with sanitization and minimum content length
+const pickDescriptionHtml = ($) => {
+    const candidates = [
+        '[itemprop="description"]',
         '.box_detail [itemprop="description"]',
         '.box_detail .box_section',
         '.box_detail article',
-        '[class*="job-description"]',
-        '.job_desc',
         '#offer-body',
-        '.description, #description',
+        '.oferta-detalle, .descripcion-oferta',
+        '.descripcion, .description, #description',
+        '.job_desc',
     ];
     for (const sel of candidates) {
         const el = $(sel).first();
-        if (el && el.length && normText(el.text()).length > 20) {
-            const html = stripAttrsKeepTags(el.html());
-            if (html) return { description_html: html, description_text: cleanHtmlToText(html) };
+        if (el && el.length) {
+            const textLen = normText(el.text()).length;
+            if (textLen > 40) {
+                return stripAttrsKeepTags(el.html());
+            }
         }
     }
-    const fallback = $('.box_detail').first();
-    if (fallback && fallback.length) {
-        const html = stripAttrsKeepTags(fallback.html());
-        if (html) return { description_html: html, description_text: cleanHtmlToText(html) };
+    const broad = $('.box_detail, .oferta, main').first();
+    if (broad && broad.length) {
+        const html = stripAttrsKeepTags(broad.html());
+        const txt = cleanHtmlToText(html);
+        if (normText(txt).length > 40) return html;
     }
-    return { description_html: null, description_text: null };
+    return null;
 };
+
+// -------------------- Extraction core --------------------
 
 const extractFromJsonLd = ($) => {
     const item = parseAllJsonLd($);
@@ -254,36 +355,29 @@ const extractFromJsonLd = ($) => {
 const extractJobDetail = ($, url) => {
     const jsonLd = extractFromJsonLd($);
 
-    // Title & company
+    // --- Title & company ---
     const title = pickFirstNonEmpty(
         jsonLd.title,
         $('h1, .box_title h1, [class*="title"]').first().text(),
     );
-    const company = pickFirstNonEmpty(
-        jsonLd.company,
-        $('.box_header .fc_base a, .box_header a, [class*="company"], [itemprop="hiringOrganization"] a')
-            .first().text(),
+
+    let company = jsonLd.company || pickCompanyFromDom($);
+    company = cleanCompanyName(company);
+
+    // --- Location ---
+    let location = pickLocation($,
+        $('.box_header p, [class*="location"], nav.breadcrumb').first().text()
     );
 
-    // Location
-    let location = pickFirstNonEmpty(
-        jsonLd.location,
-        extractLabeledValue($, [/ubicaci[oó]n/i, /ciudad/i, /estado/i, /localidad/i]),
-        $('.box_header p, [class*="location"], nav.breadcrumb').first().text(),
-    );
-    if (location) {
-        location = location.replace(/Publicado.*$/i, '').replace(/\s+\|\s+$/, '').trim();
-    }
-
-    // Salary
+    // --- Salary ---
     let salary_struct = jsonLd.salary_struct || null;
     let salary_text = null;
     if (!salary_struct) {
         const scraped = extractLabeledValue($, [/salario/i, /sueldo/i, /compensaci[oó]n/i]);
-        if (scraped) salary_text = scraped;
+        if (scraped) salary_text = normText(scraped);
     }
 
-    // Employment type
+    // --- Employment type ---
     let employmentType = jsonLd.employmentType || null;
     if (!employmentType) {
         const tipoContrato = extractLabeledValue($, [/tipo de contrato/i, /contrato/i]);
@@ -292,7 +386,7 @@ const extractJobDetail = ($, url) => {
         if (types.length) employmentType = Array.from(new Set(types));
     }
 
-    // Date posted
+    // --- Date posted ---
     let datePosted = jsonLd.datePosted || null;
     if (!datePosted) {
         const rel = extractLabeledValue($, [/publicado/i, /fecha de publicaci[oó]n/i]);
@@ -300,21 +394,23 @@ const extractJobDetail = ($, url) => {
         datePosted = iso || null;
     }
 
-    // Description
+    // --- Description ---
     let description_html = null;
     let description_text = null;
 
-    if (jsonLd.description_raw && normText(jsonLd.description_raw).length > 20) {
+    if (jsonLd.description_raw && normText(jsonLd.description_raw).length > 40) {
         const sanitized = stripAttrsKeepTags(jsonLd.description_raw);
-        if (sanitized && normText(cleanHtmlToText(sanitized)).length > 20) {
+        if (sanitized && normText(cleanHtmlToText(sanitized)).length > 40) {
             description_html = sanitized;
             description_text = cleanHtmlToText(sanitized);
         }
     }
     if (!description_html) {
-        const desc = extractDescription($);
-        description_html = desc.description_html;
-        description_text = desc.description_text;
+        const html = pickDescriptionHtml($);
+        if (html) {
+            description_html = html;
+            description_text = cleanHtmlToText(html);
+        }
     }
 
     const job = {
@@ -329,11 +425,8 @@ const extractJobDetail = ($, url) => {
         employmentType: employmentType || null,
     };
 
-    if (salary_struct) {
-        Object.assign(job, salary_struct);
-    } else if (salary_text) {
-        job.salary_text = salary_text;
-    }
+    if (salary_struct) Object.assign(job, salary_struct);
+    else if (salary_text) job.salary_text = salary_text;
 
     // Guard: CSS-only capture
     if (job.description_html && /{.*}/.test(job.description_html) && !/<(p|ul|li|a|strong|em|br|h3|h4)/i.test(job.description_html)) {
@@ -346,6 +439,14 @@ const extractJobDetail = ($, url) => {
 
 // -------------------- Start URL normalization --------------------
 
+/**
+ * Accept a wide variety of inputs:
+ * - { startUrls: [{ url }, ...] }
+ * - { startUrls: ["https://...", ...] }
+ * - { startUrl: "https://..." }
+ * - { urls: ["https://...", ...] } or { urls: "https://...\nhttps://..." }
+ * - { requests: [{ url }, ...] } or { requests: ["https://...", ...] }
+ */
 const normalizeStartRequests = (input) => {
     const out = [];
 
@@ -397,6 +498,7 @@ router.addDefaultHandler(async ({ $, request, log, enqueueLinks }) => {
 
     log.info(`Listing page: ${request.url}`);
 
+    // Detail links (several patterns to catch template variants)
     await enqueueLinks({
         selector: [
             'a[href*="/oferta-"]',
@@ -419,6 +521,7 @@ router.addDefaultHandler(async ({ $, request, log, enqueueLinks }) => {
         },
     });
 
+    // Pagination
     await enqueueLinks({
         selector: 'a[href*="page="], .pagination a, a.next, a[rel="next"]',
         forefront: false,
@@ -440,7 +543,7 @@ await Actor.main(async () => {
         maxConcurrency = 10,
         proxy = { useApifyProxy: true }, // customize groups in input
         requestHandlerTimeoutSecs = 45,
-        maxRequestRetries = 2, // crawler-level retries (OK)
+        maxRequestRetries = 2, // crawler-level retries
     } = input;
 
     // Normalize & validate start requests
@@ -453,9 +556,11 @@ await Actor.main(async () => {
     // Proxy rotation
     const proxyConfiguration = await Actor.createProxyConfiguration(proxy);
 
+    // Queue & seed requests
     const requestQueue = await RequestQueue.open();
     for (const r of startRequests) await requestQueue.addRequest(r);
 
+    // Crawler
     const crawler = new CheerioCrawler({
         requestQueue,
         maxRequestsPerCrawl,
@@ -467,9 +572,10 @@ await Actor.main(async () => {
         persistCookiesPerSession: true,
         sessionPoolOptions: {
             maxPoolSize: Math.max(8, maxConcurrency * 3),
-            // IMPORTANT: do not pass invalid keys here (e.g., maxRequestRetries) — it belongs at crawler level.
+            // Don't pass invalid keys here; maxRequestRetries is set at crawler level.
         },
 
+        // Gentle header tweaks; Crawlee/gotScraping already does a lot
         preNavigationHooks: [
             async ({ request }) => {
                 request.headers['accept-language'] = request.headers['accept-language'] || 'es-ES,es;q=0.9,en;q=0.8';
@@ -485,7 +591,7 @@ await Actor.main(async () => {
         },
 
         requestHandlerTimeoutSecs,
-        maxRequestRetries, // valid here
+        maxRequestRetries,
     });
 
     log.info('Starting crawler...');
