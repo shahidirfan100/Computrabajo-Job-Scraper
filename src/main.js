@@ -226,8 +226,6 @@ async function main() {
                 'Cache-Control': 'no-cache',
                 'Pragma': 'no-cache',
                 'DNT': '1',
-                'Connection': 'keep-alive',
-                'Keep-Alive': '300',
                 'Upgrade-Insecure-Requests': '1',
                 'Sec-Fetch-Dest': 'document',
                 'Sec-Fetch-Mode': 'navigate',
