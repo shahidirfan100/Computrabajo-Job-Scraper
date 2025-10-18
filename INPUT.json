@@ -1,0 +1,13 @@
+{
+  "startUrls": ["https://mx.computrabajo.com/trabajo-de-asesor-de-ventas"],
+  "maxResults": 50,
+  "maxPages": 5,
+  "collectDetails": true,
+  "stealthMode": true,
+  "proxyConfiguration": {
+    "useApifyProxy": true,
+    "apifyProxyGroups": ["AUTO"]
+  },
+  "requestDelayMs": 2000,
+  "maxConcurrency": 3
+}

@@ -1,0 +1,91 @@
+{
+  "title": "Computrabajo Mexico Jobs Scraper",
+  "description": "Scrape job listings from Computrabajo Mexico (https://mx.computrabajo.com) with stealth mode, pagination, and structured data extraction. Provide job category URL or search keyword.",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "startUrls": {
+      "title": "Start URLs",
+      "type": "array",
+      "description": "Array of Computrabajo Mexico URLs to scrape. Example: ['https://mx.computrabajo.com/trabajo-de-asesor-de-ventas']. If empty, uses keyword to build URL.",
+      "editor": "textfield",
+      "prefill": "[\"https://mx.computrabajo.com/trabajo-de-asesor-de-ventas\"]",
+      "default": []
+    },
+    "keyword": {
+      "title": "Job Keyword (if not using Start URLs)",
+      "type": "string",
+      "description": "Job category keyword to search for. Converted to URL format: /trabajo-de-{keyword}. Examples: 'asesor-de-ventas', 'marketing', 'atencion-al-cliente'.",
+      "editor": "textfield",
+      "prefill": "asesor-de-ventas"
+    },
+    "maxResults": {
+      "title": "Maximum Results",
+      "type": "integer",
+      "description": "Maximum number of job listings to collect from all pages.",
+      "minimum": 1,
+      "maximum": 5000,
+      "default": 100,
+      "editor": "number"
+    },
+    "maxPages": {
+      "title": "Maximum Pages to Scrape",
+      "type": "integer",
+      "description": "Maximum number of pagination pages to visit. Safety limit to prevent excessive scraping.",
+      "minimum": 1,
+      "maximum": 500,
+      "default": 20,
+      "editor": "number"
+    },
+    "collectDetails": {
+      "title": "Scrape Job Details",
+      "type": "boolean",
+      "description": "If true, opens each job detail page to extract full HTML and text descriptions. Increases scraping time but provides richer data.",
+      "editor": "checkbox",
+      "default": true
+    },
+    "stealthMode": {
+      "title": "Enable Stealth Mode",
+      "type": "boolean",
+      "description": "If true, uses advanced anti-detection techniques: randomized delays, header rotation, session management, and intelligent caching.",
+      "editor": "checkbox",
+      "default": true
+    },
+    "proxyConfiguration": {
+      "title": "Proxy Configuration",
+      "type": "object",
+      "description": "Configure proxy rotation for requests. Use Apify Proxy (recommended) or custom proxies. Essential for large-scale scraping.",
+      "editor": "proxy",
+      "default": {
+        "useApifyProxy": true,
+        "apifyProxyGroups": ["AUTO"]
+      }
+    },
+    "requestDelayMs": {
+      "title": "Request Delay (milliseconds)",
+      "type": "integer",
+      "description": "Base delay between requests (in stealth mode, adds randomization). Range: 500-5000ms. Higher values reduce bot detection risk.",
+      "minimum": 500,
+      "maximum": 5000,
+      "default": 2000,
+      "editor": "number"
+    },
+    "maxConcurrency": {
+      "title": "Max Concurrent Requests",
+      "type": "integer",
+      "description": "Maximum number of parallel requests. Lower values (2-3) are stealthier; higher values (5-10) are faster but riskier.",
+      "minimum": 1,
+      "maximum": 20,
+      "default": 3,
+      "editor": "number"
+    },
+    "customHeaders": {
+      "title": "Custom HTTP Headers (JSON)",
+      "type": "string",
+      "description": "Optional JSON object of custom HTTP headers to include in all requests. Example: {\"Accept-Language\": \"es-MX\"}",
+      "editor": "textarea"
+    }
+  },
+  "required": [],
+  "additionalProperties": false
+}
