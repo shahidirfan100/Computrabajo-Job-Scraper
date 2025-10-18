@@ -1,108 +1,55 @@
 {
   "title": "Computrabajo Mexico Jobs Scraper",
-  "description": "Scrape job listings from Computrabajo Mexico (https://mx.computrabajo.com) with stealth mode, pagination, and structured data extraction. Provide job category URL or search keyword.",
+  "description": "Scrape job listings from Computrabajo Mexico with stealth mode, pagination, and structured data extraction. Provide job category URL or search keyword.",
   "type": "object",
   "schemaVersion": 1,
   "properties": {
-    "startUrls": {
-      "title": "Start URLs",
-      "type": "array",
-      "description": "Array of Computrabajo Mexico URLs to scrape. Example: ['https://mx.computrabajo.com/trabajo-de-asesor-de-ventas']. If empty, uses keyword to build URL.",
-      "editor": "select",
-      "default": []
-    },
-    "keyword": {
-      "title": "Job Keyword (if not using Start URLs)",
-      "type": "string",
-      "description": "Job category keyword to search for. Converted to URL format: /trabajo-de-{keyword}. Examples: 'asesor-de-ventas', 'marketing', 'atencion-al-cliente'.",
-      "editor": "textfield",
-      "prefill": "asesor-de-ventas"
-    },
-    "startUrlsText": {
-      "title": "Start URLs (paste newline-separated)",
-      "type": "string",
-      "description": "Optional: paste one URL per line. This takes precedence over the `startUrls` select. Useful for free-form lists.",
-      "editor": "textarea"
-    },
     "startUrl": {
       "title": "Start URL",
       "type": "string",
-      "description": "Start scraping from a specific Computrabajo search URL. If provided, this will be used instead of Keyword.",
+      "description": "Start scraping from a specific Workopolis.com search URL. If provided, this will be used instead of Keyword/Location.",
       "editor": "textfield"
     },
-    "maxResults": {
-      "title": "Maximum Results",
-      "type": "integer",
-      "description": "Maximum number of job listings to collect from all pages.",
-      "minimum": 1,
-      "maximum": 5000,
-      "default": 100,
-      "editor": "number"
+    "keyword": {
+      "title": "Keyword (if not using Start URL)",
+      "type": "string",
+      "description": "Job search keyword(s), e.g., 'Software Developer', 'Marketing Manager', 'Data Analyst', 'Nurse', 'Sales Representative'.",
+      "editor": "textfield",
+      "prefill": "software engineer"
     },
-    "maxPages": {
-      "title": "Maximum Pages to Scrape",
-      "type": "integer",
-      "description": "Maximum number of pagination pages to visit. Safety limit to prevent excessive scraping.",
-      "minimum": 1,
-      "maximum": 500,
-      "default": 20,
-      "editor": "number"
+    "location": {
+      "title": "Location (if not using Start URL)",
+      "type": "string",
+      "description": "Geographic location to search in, e.g., 'Toronto', 'Vancouver', 'Calgary', 'Montreal', 'Ottawa', 'Edmonton', 'Quebec City', 'Winnipeg', 'Halifax', 'Victoria'.",
+      "editor": "textfield",
+      "prefill": "Toronto"
+    },
+    "posted_date": {
+      "title": "Posted Date (if not using Start URL)",
+      "type": "string",
+      "description": "Filter jobs by how recently they were posted.",
+      "enum": [
+        "anytime",
+        "24h",
+        "7d",
+        "30d"
+      ],
+      "prefill": "anytime",
+      "editor": "select"
     },
     "collectDetails": {
-      "title": "Scrape Job Details",
+      "title": "Collect job details",
       "type": "boolean",
-      "description": "If true, opens each job detail page to extract full HTML and text descriptions. Increases scraping time but provides richer data.",
+      "description": "If enabled, scraper opens job detail pages for full description/salary.",
       "editor": "checkbox",
       "default": true
-    },
-    "stealthMode": {
-      "title": "Enable Stealth Mode",
-      "type": "boolean",
-      "description": "If true, uses advanced anti-detection techniques: randomized delays, header rotation, session management, and intelligent caching.",
-      "editor": "checkbox",
-      "default": true
-    },
-    "proxyConfiguration": {
-      "title": "Proxy Configuration",
-      "type": "object",
-      "description": "Configure proxy rotation for requests. Use Apify Proxy (recommended) or custom proxies. Essential for large-scale scraping.",
-      "editor": "proxy",
-      "default": {
-        "useApifyProxy": true,
-        "apifyProxyGroups": ["AUTO"]
-      }
-    },
-    "requestDelayMs": {
-      "title": "Request Delay (milliseconds)",
-      "type": "integer",
-      "description": "Base delay between requests (in stealth mode, adds randomization). Range: 500-5000ms. Higher values reduce bot detection risk.",
-      "minimum": 500,
-      "maximum": 5000,
-      "default": 2000,
-      "editor": "number"
-    },
-    "minRequestDelay": {
-      "title": "Minimum request delay (ms)",
-      "type": "integer",
-      "description": "Minimum delay between requests in milliseconds (for politeness and stealth).",
-      "minimum": 0,
-      "default": 500,
-      "editor": "number"
-    },
-    "maxRequestDelay": {
-      "title": "Maximum request delay (ms)",
-      "type": "integer",
-      "description": "Maximum delay between requests in milliseconds (random delays help avoid detection).",
-      "minimum": 0,
-      "default": 1500,
-      "editor": "number"
     },
     "results_wanted": {
       "title": "Maximum number of jobs",
       "type": "integer",
       "description": "The maximum number of jobs to collect. Leave empty to collect all available jobs.",
       "minimum": 1,
-      "default": 100,
+      "default": 50,
       "editor": "number"
     },
     "max_pages": {
@@ -111,7 +58,17 @@
       "description": "A safety cap on the number of search result pages to visit.",
       "minimum": 1,
       "editor": "number",
-      "default": 20
+      "default": 10
+    },
+    "proxyConfiguration": {
+      "title": "Proxy configuration",
+      "type": "object",
+      "description": "Use Apify Proxy for the best results.",
+      "editor": "proxy",
+      "default": {
+        "useApifyProxy": true,
+        "apifyProxyGroups": ["AUTO"]
+      }
     },
     "cookies": {
       "title": "Custom cookies (raw header)",
@@ -123,21 +80,6 @@
       "title": "Custom cookies (JSON)",
       "type": "string",
       "description": "Optional JSON-formatted cookies. Accepts an array (e.g., [{\"name\":\"a\",\"value\":\"1\"}]) or an object map (e.g., {\"a\":\"1\"}).",
-      "editor": "textarea"
-    },
-    "maxConcurrency": {
-      "title": "Max Concurrent Requests",
-      "type": "integer",
-      "description": "Maximum number of parallel requests. Lower values (2-3) are stealthier; higher values (5-10) are faster but riskier.",
-      "minimum": 1,
-      "maximum": 20,
-      "default": 3,
-      "editor": "number"
-    },
-    "customHeaders": {
-      "title": "Custom HTTP Headers (JSON)",
-      "type": "string",
-      "description": "Optional JSON object of custom HTTP headers to include in all requests. Example: {\"Accept-Language\": \"es-MX\"}",
       "editor": "textarea"
     }
   },
