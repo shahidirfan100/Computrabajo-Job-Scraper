@@ -12,29 +12,26 @@ async function main() {
     try {
         const input = (await Actor.getInput()) || {};
         const {
-            startUrls = [],
-            startUrlsText = '',
             startUrl = '',
             keyword = 'asesor-de-ventas',
-            results_wanted: RESULTS_WANTED = undefined,
-            max_pages: MAX_PAGES_LEGACY = undefined,
-            maxResults: MAX_RESULTS_RAW = 100,
-            maxPages: MAX_PAGES_RAW = 20,
+            location = '',
+            posted_date = 'anytime',
             collectDetails = true,
-            stealthMode = true,
+            results_wanted = 50,
+            max_pages = 10,
             proxyConfiguration,
-            requestDelayMs: BASE_DELAY_MS = 2000,
-            minRequestDelay = 500,
-            maxRequestDelay = 1500,
-            maxConcurrency: MAX_CONCURRENCY_RAW = 3,
             cookies = '',
             cookiesJson = '',
         } = input;
 
-    // Normalize legacy and current inputs
-    const MAX_RESULTS = Math.max(1, Number.isFinite(+ (RESULTS_WANTED ?? MAX_RESULTS_RAW)) ? Math.floor(+ (RESULTS_WANTED ?? MAX_RESULTS_RAW)) : 100);
-    const MAX_PAGES = Math.max(1, Number.isFinite(+ (MAX_PAGES_LEGACY ?? MAX_PAGES_RAW)) ? Math.floor(+ (MAX_PAGES_LEGACY ?? MAX_PAGES_RAW)) : 20);
-        const MAX_CONCURRENCY = Math.max(1, Math.min(10, Number.isFinite(+MAX_CONCURRENCY_RAW) ? Math.floor(+MAX_CONCURRENCY_RAW) : 3));
+        // Internal defaults (not exposed in schema)
+        const stealthMode = true;
+        const minRequestDelay = 500;
+        const maxRequestDelay = 1500;
+        const MAX_CONCURRENCY = 3;
+
+        const MAX_RESULTS = Math.max(1, Math.floor(Number(results_wanted) || 50));
+        const MAX_PAGES = Math.max(1, Math.floor(Number(max_pages) || 10));
 
 
         // Parse custom headers safely
@@ -76,11 +73,15 @@ async function main() {
         const cleanHtmlToText = (html) => {
             if (!html) return '';
             const $ = cheerioLoad(html);
-            $('script, style, noscript').remove();
-            return $.root().text().replace(/\s+/g, ' ').trim();
-        };
-
-        const buildSearchUrl = (searchKeyword) => {
+            $('script, style, noscript, [class*="animating"], [class*="hide"], [id*="complaint"], [data-complaint-overlay]').remove();
+            let text = $.root().text().replace(/\s+/g, ' ').trim();
+            // Remove common error/popup patterns
+            text = text.replace(/Error al realizar.*?minutos\./gi, '');
+            text = text.replace(/Por qué quieres reportar.*?privacidad/gi, '');
+            text = text.replace(/Gracias por tu denuncia.*?empresa\./gi, '');
+            text = text.replace(/¿Por qué quieres reportar.*?elecci[óo]n/gi, '');
+            return text.replace(/\s+/g, ' ').trim();
+        };        const buildSearchUrl = (searchKeyword) => {
             if (!searchKeyword || typeof searchKeyword !== 'string') {
                 return 'https://mx.computrabajo.com/trabajo-de-asesor-de-ventas';
             }
@@ -89,17 +90,12 @@ async function main() {
             return `https://mx.computrabajo.com/trabajo-de-${normalized}`;
         };
 
-        // Initialize URLs (priority: startUrl > startUrlsText > startUrls array > built keyword URL)
+        // Initialize URLs (priority: startUrl > built keyword URL)
         const initialUrls = [];
         if (typeof startUrl === 'string' && startUrl.trim().length > 0) {
             initialUrls.push(startUrl.trim());
-        } else if (typeof startUrlsText === 'string' && startUrlsText.trim().length > 0) {
-            const parsed = startUrlsText.split(/[\r\n]+/).map(s => s.trim()).filter(Boolean);
-            initialUrls.push(...parsed);
-        } else if (Array.isArray(startUrls) && startUrls.length > 0) {
-            initialUrls.push(...startUrls.filter(u => typeof u === 'string' && u.length > 0));
-        }
-        if (initialUrls.length === 0) {
+        } else {
+            // For now build URL from keyword; location and posted_date are informational inputs
             initialUrls.push(buildSearchUrl(keyword));
         }
 
@@ -135,13 +131,25 @@ async function main() {
                 for (const item of items) {
                     const itemType = item['@type'] || item.type;
                     if (itemType === 'JobPosting' || (Array.isArray(itemType) && itemType.includes('JobPosting'))) {
+                        // Extract salary range (baseSalary can be object with currency, value, unitText)
+                        let salary = null;
+                        if (item.baseSalary) {
+                            if (typeof item.baseSalary === 'string') {
+                                salary = item.baseSalary;
+                            } else if (item.baseSalary.currency && item.baseSalary.value) {
+                                salary = `${item.baseSalary.currency} ${item.baseSalary.value}`;
+                            } else if (item.baseSalary.value) {
+                                salary = String(item.baseSalary.value);
+                            }
+                        }
+                        
                         return {
                             title: item.title || item.name || null,
                             company: item.hiringOrganization?.name || null,
                             datePosted: item.datePosted || null,
                             description: item.description || null,
                             location: item.jobLocation?.address?.addressLocality || item.jobLocation?.address?.addressRegion || null,
-                            salary: item.baseSalary?.value || null,
+                            salary: salary,
                             employmentType: item.employmentType || null,
                         };
                     }
@@ -186,46 +194,98 @@ async function main() {
             // Fallback selectors for each field
             const title = jsonLd.title || $('h1, .box_title h1, [class*="title"]').first().text().trim() || null;
             const company = jsonLd.company 
-                || $('.fc_base a, [class*="company"]').first().text().trim() 
+                || $('a[href*="/empresa/"], [class*="company"], .box_header .fc_base a').first().text().trim() 
                 || null;
-            const location = jsonLd.location 
-                || $('.box_header p, [class*="location"]').first().text().trim()
-                || null;
+            
+            // Extract location: try JSON-LD, then specific Computrabajo selectors
+            let location = jsonLd.location || null;
+            if (!location) {
+                const locEl = $('.box_header p, [class*="location"], [class*="ciudad"], [class*="ubication"]').first().text().trim();
+                location = locEl && locEl.length > 0 ? locEl : null;
+                // If still not found, search in structured data attributes
+                if (!location) {
+                    const attr = $('[data-location], [data-city], [data-ubicacion]').first().text().trim();
+                    location = attr && attr.length > 0 ? attr : null;
+                }
+            }
+            
+            // Extract salary: try JSON-LD, then HTML selectors
+            let salary = jsonLd.salary || null;
+            if (!salary) {
+                const salEl = $('[class*="salary"], [class*="sueldo"], [class*="precio"], [data-salary]').first().text().trim();
+                salary = salEl && salEl.length > 0 ? salEl : null;
+            }
+            
+            // Extract employmentType: try JSON-LD, then HTML selectors
+            let employmentType = jsonLd.employmentType || null;
+            if (!employmentType) {
+                const empEl = $('[class*="employment"], [class*="contract"], [class*="tipo-contrato"], [data-employment-type]').first().text().trim();
+                employmentType = empEl && empEl.length > 0 ? empEl : null;
+            }
+            
+            // Extract datePosted: try JSON-LD, then HTML selectors (look for date patterns)
+            let datePosted = jsonLd.datePosted || null;
+            if (!datePosted) {
+                const dateEl = $('[class*="date"], [class*="fecha"], [class*="posted"], [data-date], time').first().text().trim();
+                datePosted = dateEl && dateEl.length > 0 ? dateEl : null;
+            }
 
             let description = jsonLd.description;
             if (!description) {
-                const descEl = $('.box_detail, [class*="job-description"], .job_desc').first();
+                const descEl = $('.box_detail, [class*="job-description"], .job_desc, [class*="offer-detail"], [class*="descripcion"]').first();
                 description = descEl.length ? descEl.html() : null;
+                // Remove error containers and loading placeholders from description HTML
+                if (description) {
+                    const tempDom = cheerioLoad(description);
+                    tempDom('[class*="animating"], [class*="hide"], [data-offers-grid-detail-container-error], [data-complaint-overlay], [id*="complaint"], [id*="complaint-popup"]').remove();
+                    description = tempDom.html();
+                }
             }
 
             return {
                 title,
                 company,
                 location,
+                salary,
+                employmentType,
+                datePosted,
                 description_html: description,
                 description_text: description ? cleanHtmlToText(description) : null,
                 url: jobUrl,
-                datePosted: jsonLd.datePosted || null,
-                salary: jsonLd.salary || null,
-                employmentType: jsonLd.employmentType || null,
                 source: 'computrabajo.com',
             };
         }
 
 
         // Helper to build per-request headers
-        const buildHeaders = () => ({
-            'User-Agent': getRandomUserAgent(),
-            'Accept-Language': getRandomAcceptLang(),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Encoding': 'gzip, deflate',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Sec-Fetch-Dest': 'document',
-            'Sec-Fetch-Mode': 'navigate',
-            'Sec-Fetch-Site': 'none',
-        });
+        const buildHeaders = () => {
+            const headers = {
+                'User-Agent': getRandomUserAgent(),
+                'Accept-Language': getRandomAcceptLang(),
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Encoding': 'gzip, deflate',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+            };
+            // Attach cookies if provided (raw or parsed)
+            if (typeof cookies === 'string' && cookies.trim().length > 0) {
+                headers['Cookie'] = cookies.trim();
+            } else if (parsedCookies) {
+                try {
+                    if (Array.isArray(parsedCookies)) {
+                        headers['Cookie'] = parsedCookies.map(c => `${c.name}=${c.value}`).join('; ');
+                    } else if (typeof parsedCookies === 'object') {
+                        headers['Cookie'] = Object.entries(parsedCookies).map(([k, v]) => `${k}=${v}`).join('; ');
+                    }
+                } catch (e) { /* ignore */ }
+            }
+            return headers;
+        };
+        
 
         const crawler = new CheerioCrawler({
             proxyConfiguration: proxyConfig,
