@@ -8,8 +8,7 @@
       "title": "Start URLs",
       "type": "array",
       "description": "Array of Computrabajo Mexico URLs to scrape. Example: ['https://mx.computrabajo.com/trabajo-de-asesor-de-ventas']. If empty, uses keyword to build URL.",
-      "editor": "textfield",
-      "prefill": "[\"https://mx.computrabajo.com/trabajo-de-asesor-de-ventas\"]",
+      "editor": "select",
       "default": []
     },
     "keyword": {
