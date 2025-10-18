@@ -72,32 +72,9 @@ async function main() {
 
         const cleanHtmlToText = (html) => {
             if (!html) return '';
-            try {
-                const $ = cheerioLoad(html);
-                
-                // Remove unwanted elements
-                $('script, style, noscript').remove();
-                $('[class*="popup"], [class*="modal"], [class*="error"]').remove();
-                $('[data-complaints], [data-complaint]').remove();
-                
-                // Extract text and normalize whitespace
-                let text = $.root().text()
-                    .replace(/\s+/g, ' ')
-                    .trim();
-                
-                // Remove common placeholder/error text
-                text = text.replace(/Error al realizar la postulación.*?pasado unos minutos\./gi, '')
-                    .replace(/Ha ocurrido un error.*?\./gi, '')
-                    .replace(/Por qué quieres reportar.*?Condiciones legales/gi, '')
-                    .trim();
-                
-                return text;
-            } catch (e) {
-                // Fallback if cheerio fails
-                return html.replace(/<[^>]*>/g, ' ')
-                    .replace(/\s+/g, ' ')
-                    .trim();
-            }
+            const $ = cheerioLoad(html);
+            $('script, style, noscript').remove();
+            return $.root().text().replace(/\s+/g, ' ').trim();
         };
 
         const buildSearchUrl = (searchKeyword) => {
@@ -147,56 +124,23 @@ async function main() {
 
         // Extract data from JSON-LD schema
         function extractJsonLd($) {
-            const jsonLdScripts = $('script[type="application/ld+json"]');
-            if (jsonLdScripts.length === 0) return null;
-            
+            const jsonLdScript = $('script[type="application/ld+json"]').html();
+            if (!jsonLdScript) return null;
             try {
-                for (let i = 0; i < jsonLdScripts.length; i++) {
-                    const jsonLdScript = jsonLdScripts.eq(i).html();
-                    if (!jsonLdScript) continue;
-                    
-                    const data = JSON.parse(jsonLdScript);
-                    const items = Array.isArray(data) ? data : [data];
-                    
-                    for (const item of items) {
-                        const itemType = item['@type'] || item.type;
-                        if (itemType === 'JobPosting' || (Array.isArray(itemType) && itemType.includes('JobPosting'))) {
-                            // Extract location - try multiple paths
-                            let location = null;
-                            if (item.jobLocation) {
-                                if (typeof item.jobLocation === 'string') {
-                                    location = item.jobLocation;
-                                } else if (item.jobLocation.address) {
-                                    location = item.jobLocation.address.addressLocality 
-                                        || item.jobLocation.address.addressRegion 
-                                        || item.jobLocation.address.streetAddress;
-                                }
-                            }
-                            
-                            // Extract salary - handle both number and object formats
-                            let salary = null;
-                            if (item.baseSalary) {
-                                if (typeof item.baseSalary === 'string') {
-                                    salary = item.baseSalary;
-                                } else if (typeof item.baseSalary === 'object') {
-                                    salary = item.baseSalary.currency && item.baseSalary.value 
-                                        ? `${item.baseSalary.currency} ${item.baseSalary.value}`
-                                        : item.baseSalary.value;
-                                }
-                            }
-                            
-                            return {
-                                title: item.title || item.name || null,
-                                company: item.hiringOrganization?.name || null,
-                                datePosted: item.datePosted || null,
-                                description: item.description || null,
-                                location: location,
-                                salary: salary,
-                                employmentType: Array.isArray(item.employmentType) 
-                                    ? item.employmentType.join(', ') 
-                                    : (item.employmentType || null),
-                            };
-                        }
+                const data = JSON.parse(jsonLdScript);
+                const items = Array.isArray(data) ? data : [data];
+                for (const item of items) {
+                    const itemType = item['@type'] || item.type;
+                    if (itemType === 'JobPosting' || (Array.isArray(itemType) && itemType.includes('JobPosting'))) {
+                        return {
+                            title: item.title || item.name || null,
+                            company: item.hiringOrganization?.name || null,
+                            datePosted: item.datePosted || null,
+                            description: item.description || null,
+                            location: item.jobLocation?.address?.addressLocality || item.jobLocation?.address?.addressRegion || null,
+                            salary: item.baseSalary?.value || null,
+                            employmentType: item.employmentType || null,
+                        };
                     }
                 }
             } catch (e) { /* silent */ }
@@ -236,83 +180,86 @@ async function main() {
         function extractJobDetail($, jobUrl) {
             const jsonLd = extractJsonLd($) || {};
 
-            // Helper to extract text safely from element
-            const getTextFrom = (selector, defaultValue = null) => {
-                const text = $(selector).first().text().trim();
-                return text ? text : defaultValue;
-            };
+            // Title
+            const title = jsonLd.title || $('h1, .box_title h1, [class*="title"]').first().text().trim() || null;
 
-            // Title - primary from JSON-LD
-            const title = jsonLd.title 
-                || getTextFrom('h1, .box_title h1, .offer-header h1, [data-js-offer-title]')
-                || null;
-
-            // Company - try JSON-LD first, then fallback selectors
+            // Company
             const company = jsonLd.company 
-                || getTextFrom('.box_header .link, .company-name, [data-js-company], .fc_base a[href*="/empresa/"]')
+                || $('.fc_base a, [class*="company"], .box_header .fc_base').first().text().trim() 
                 || null;
 
-            // Location - improved selector to avoid generic p tags
-            const location = jsonLd.location 
-                || getTextFrom('[data-js-location], .box_header [class*="location"], .box_header li:first-child, .offer-location')
+            // Location (try several selectors)
+            let location = jsonLd.location 
+                || $('.box_header p:contains("Ubicación"), .box_header [class*="location"], .box_header .fc_base span').first().text().trim()
+                || $('[data-label="Ubicación"], .job-location, .location, .box_header p').first().text().trim()
                 || null;
+            if (location && /Ubicación/i.test(location)) {
+                location = location.replace(/.*Ubicación:?/i, '').trim();
+            }
+            if (location === '') location = null;
 
-            // Employment Type - look for contract type indicators
-            const employmentType = jsonLd.employmentType 
-                || getTextFrom('[data-js-employment-type], .box_header [class*="employment"], .contract-type, .employment-type')
-                || null;
-
-            // Date Posted - look for date indicators
-            const datePosted = jsonLd.datePosted 
-                || getTextFrom('[data-js-date-posted], .box_header time, .posted-date, .date-posted, [datetime]')
-                || null;
-
-            // Description - IMPROVED: Filter out error messages and unnecessary markup
-            let description = jsonLd.description;
-            if (!description) {
-                // Select the main job description container
-                let descEl = $('.box_detail').first();
-                
-                // Fallback selectors if main one fails
-                if (!descEl.length) {
-                    descEl = $('.job_description, [data-js-job-description], .offer-description, .job-details').first();
+            // Salary (try JSON-LD, then visible selectors)
+            let salary = jsonLd.salary;
+            if (!salary) {
+                salary = $('[data-label="Salario"], .salary, .box_header p:contains("Salario")').first().text().trim() || null;
+                if (salary && /Salario/i.test(salary)) {
+                    salary = salary.replace(/.*Salario:?/i, '').trim();
                 }
-                
-                if (descEl.length) {
-                    // Clone to avoid modifying original DOM
-                    const cloned = descEl.clone();
-                    
-                    // Remove error messages, popups, and unwanted elements
-                    cloned.find('[data-offers-grid-detail-container-error]').remove();
-                    cloned.find('[data-complaint-overlay]').remove();
-                    cloned.find('#complaint-popup-container').remove();
-                    cloned.find('.hide').remove();
-                    cloned.find('script, style, noscript').remove();
-                    cloned.find('[class*="popup"], [class*="modal"], [class*="error"]').each((_, el) => {
-                        const classes = $(el).attr('class') || '';
-                        // Only remove if it's clearly a popup/modal/error element
-                        if (/popup|modal|overlay|error.*container/i.test(classes)) {
-                            $(el).remove();
-                        }
-                    });
-                    
-                    description = cloned.html();
-                }
+                if (salary === '') salary = null;
             }
 
-            // Clean description text from HTML
-            const descriptionText = description ? cleanHtmlToText(description) : null;
+            // Employment Type (try JSON-LD, then visible selectors)
+            let employmentType = jsonLd.employmentType;
+            if (!employmentType) {
+                employmentType = $('[data-label="Jornada"], .employment-type, .box_header p:contains("Jornada")').first().text().trim() || null;
+                if (employmentType && /Jornada/i.test(employmentType)) {
+                    employmentType = employmentType.replace(/.*Jornada:?/i, '').trim();
+                }
+                if (employmentType === '') employmentType = null;
+            }
+
+            // Date Posted (try JSON-LD, then visible selectors)
+            let datePosted = jsonLd.datePosted;
+            if (!datePosted) {
+                datePosted = $('[data-label="Publicada"], .date-posted, .box_header p:contains("Publicada")').first().text().trim() || null;
+                if (datePosted && /Publicada/i.test(datePosted)) {
+                    datePosted = datePosted.replace(/.*Publicada:?/i, '').trim();
+                }
+                if (datePosted === '') datePosted = null;
+            }
+
+            // Description (HTML, keep formatting but remove unrelated blocks)
+            let description_html = null;
+            let description_text = null;
+            if (jsonLd.description) {
+                // If JSON-LD has HTML, use it, else treat as text
+                if (/<[a-z][\s\S]*>/i.test(jsonLd.description)) {
+                    description_html = jsonLd.description;
+                } else {
+                    description_html = `<p>${jsonLd.description}</p>`;
+                }
+                description_text = cleanHtmlToText(jsonLd.description);
+            } else {
+                // Try to get the main job description block, but avoid hidden, unrelated, or popup content
+                const descEl = $('.box_detail, [class*="job-description"], .job_desc').first();
+                if (descEl.length) {
+                    // Remove known unrelated/popups/hidden blocks
+                    descEl.find('.hide, [data-offers-grid-detail-container-error], [data-complaint-overlay], .popup, #complaint-popup-container, #legal-tooltip-conditions-container').remove();
+                    description_html = descEl.html();
+                    description_text = cleanHtmlToText(description_html);
+                }
+            }
 
             return {
                 title,
                 company,
                 location,
-                description_html: description,
-                description_text: descriptionText,
-                url: jobUrl,
-                datePosted,
-                salary: jsonLd.salary || null,
+                salary,
                 employmentType,
+                datePosted,
+                description_html,
+                description_text,
+                url: jobUrl,
                 source: 'computrabajo.com',
             };
         }
