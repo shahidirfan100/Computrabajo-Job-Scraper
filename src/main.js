@@ -26,9 +26,9 @@ async function main() {
 
         // Internal defaults (not exposed in schema)
         const stealthMode = true;
-        const minRequestDelay = 500;
-        const maxRequestDelay = 1500;
-        const MAX_CONCURRENCY = 3;
+        const minRequestDelay = 1500;  // Increased from 500 to avoid 403 errors
+        const maxRequestDelay = 4000;  // Increased from 1500 to avoid 403 errors
+        const MAX_CONCURRENCY = 2;     // Reduced from 3 for extra stealth
 
         const MAX_RESULTS = Math.max(1, Math.floor(Number(results_wanted) || 50));
         const MAX_PAGES = Math.max(1, Math.floor(Number(max_pages) || 10));
@@ -187,60 +187,19 @@ async function main() {
             return null;
         }
 
-        // Extract job detail data
+        // Extract job detail data - prioritize JSON-LD only (most reliable)
         function extractJobDetail($, jobUrl) {
             const jsonLd = extractJsonLd($) || {};
 
-            // Fallback selectors for each field
-            const title = jsonLd.title || $('h1, .box_title h1, [class*="title"]').first().text().trim() || null;
-            const company = jsonLd.company 
-                || $('a[href*="/empresa/"], [class*="company"], .box_header .fc_base a').first().text().trim() 
-                || null;
-            
-            // Extract location: try JSON-LD, then specific Computrabajo selectors
-            let location = jsonLd.location || null;
-            if (!location) {
-                const locEl = $('.box_header p, [class*="location"], [class*="ciudad"], [class*="ubication"]').first().text().trim();
-                location = locEl && locEl.length > 0 ? locEl : null;
-                // If still not found, search in structured data attributes
-                if (!location) {
-                    const attr = $('[data-location], [data-city], [data-ubicacion]').first().text().trim();
-                    location = attr && attr.length > 0 ? attr : null;
-                }
-            }
-            
-            // Extract salary: try JSON-LD, then HTML selectors
-            let salary = jsonLd.salary || null;
-            if (!salary) {
-                const salEl = $('[class*="salary"], [class*="sueldo"], [class*="precio"], [data-salary]').first().text().trim();
-                salary = salEl && salEl.length > 0 ? salEl : null;
-            }
-            
-            // Extract employmentType: try JSON-LD, then HTML selectors
-            let employmentType = jsonLd.employmentType || null;
-            if (!employmentType) {
-                const empEl = $('[class*="employment"], [class*="contract"], [class*="tipo-contrato"], [data-employment-type]').first().text().trim();
-                employmentType = empEl && empEl.length > 0 ? empEl : null;
-            }
-            
-            // Extract datePosted: try JSON-LD, then HTML selectors (look for date patterns)
-            let datePosted = jsonLd.datePosted || null;
-            if (!datePosted) {
-                const dateEl = $('[class*="date"], [class*="fecha"], [class*="posted"], [data-date], time').first().text().trim();
-                datePosted = dateEl && dateEl.length > 0 ? dateEl : null;
-            }
-
-            let description = jsonLd.description;
-            if (!description) {
-                const descEl = $('.box_detail, [class*="job-description"], .job_desc, [class*="offer-detail"], [class*="descripcion"]').first();
-                description = descEl.length ? descEl.html() : null;
-                // Remove error containers and loading placeholders from description HTML
-                if (description) {
-                    const tempDom = cheerioLoad(description);
-                    tempDom('[class*="animating"], [class*="hide"], [data-offers-grid-detail-container-error], [data-complaint-overlay], [id*="complaint"], [id*="complaint-popup"]').remove();
-                    description = tempDom.html();
-                }
-            }
+            // Use JSON-LD exclusively; it's structured and reliable
+            // Fallback to null if not available to avoid picking up permission prompts, modals, etc.
+            const title = jsonLd.title || null;
+            const company = jsonLd.company || null;
+            const location = jsonLd.location || null;
+            const salary = jsonLd.salary || null;
+            const employmentType = jsonLd.employmentType || null;
+            const datePosted = jsonLd.datePosted || null;
+            const description = jsonLd.description || null;
 
             return {
                 title,
@@ -257,19 +216,24 @@ async function main() {
         }
 
 
-        // Helper to build per-request headers
-        const buildHeaders = () => {
+        // Helper to build per-request headers with anti-bot measures
+        const buildHeaders = (referer = 'https://mx.computrabajo.com/') => {
             const headers = {
                 'User-Agent': getRandomUserAgent(),
                 'Accept-Language': getRandomAcceptLang(),
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Encoding': 'gzip, deflate',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Cache-Control': 'no-cache',
+                'Pragma': 'no-cache',
                 'DNT': '1',
                 'Connection': 'keep-alive',
+                'Keep-Alive': '300',
                 'Upgrade-Insecure-Requests': '1',
                 'Sec-Fetch-Dest': 'document',
                 'Sec-Fetch-Mode': 'navigate',
                 'Sec-Fetch-Site': 'none',
+                'Sec-Fetch-User': '?1',
+                'Referer': referer,
             };
             // Attach cookies if provided (raw or parsed)
             if (typeof cookies === 'string' && cookies.trim().length > 0) {
@@ -320,7 +284,7 @@ async function main() {
                                     urls: toQueue,
                                     userData: { label: 'DETAIL' },
                                     transformRequestFunction: (req) => {
-                                        req.headers = { ...(req.headers || {}), ...buildHeaders() };
+                                        req.headers = { ...(req.headers || {}), ...buildHeaders(request.url) };
                                         if (stealthMode && totalSaved > 0) {
                                             const delay = getStealthDelay();
                                             if (delay > 0) return new Promise(res => setTimeout(() => res(req), delay));
@@ -346,7 +310,7 @@ async function main() {
                                     urls: [nextUrl],
                                     userData: { label: 'LIST', pageNum: pageNum + 1 },
                                     transformRequestFunction: (req) => {
-                                        req.headers = { ...(req.headers || {}), ...buildHeaders() };
+                                        req.headers = { ...(req.headers || {}), ...buildHeaders(request.url) };
                                         return req;
                                     }
                                 });
@@ -374,7 +338,14 @@ async function main() {
                 }
             },
             errorHandler: async ({ request, error, log: logger }) => {
-                logger.warning(`Failed: ${request.url} - ${error.message}`);
+                // Handle 403 gracefully (site blocking/rate limiting)
+                if (error.message && error.message.includes('403')) {
+                    logger.warning(`[403 Blocked] ${request.url} - Computrabajo blocked this request. Sleeping before retry.`);
+                    // Small delay before potential retry
+                    await new Promise(r => setTimeout(r, 2000 + Math.random() * 3000));
+                } else {
+                    logger.warning(`Failed: ${request.url} - ${error.message}`);
+                }
             },
         });
 
@@ -385,7 +356,7 @@ async function main() {
         const initialRequests = initialUrls.map(url => ({
             url,
             userData: { label: 'LIST', pageNum: 1 },
-            headers: buildHeaders(),
+            headers: buildHeaders('https://mx.computrabajo.com/'),
         }));
 
         await crawler.run(initialRequests);
