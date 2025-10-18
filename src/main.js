@@ -1,16 +1,15 @@
-// main.js
-// Apify SDK + Crawlee + modern HTTP-based scraping (gotScraping)
-// Fully compatible, with proxy rotation, sessions, and robust extraction for job details.
+// src/main.js (ESM)
+// Apify SDK + Crawlee (CheerioCrawler) + gotScraping (HTTP-based), ESM compatible.
 
-const { Actor } = require('apify');
-const {
+import { Actor } from 'apify';
+import {
     CheerioCrawler,
     createCheerioRouter,
     Dataset,
     log,
     RequestQueue,
-} = require('crawlee');
-const cheerio = require('cheerio');
+} from 'crawlee';
+import cheerio from 'cheerio';
 
 // -------------------- Helpers --------------------
 
@@ -29,30 +28,29 @@ const pickFirstNonEmpty = (...vals) => {
 const cleanHtmlToText = (html) => {
     if (!html) return null;
     const $ = cheerio.load(html);
-    // remove any remaining non-content tags just in case
     $('script, style, noscript, iframe, form, button, svg').remove();
     return normText($.root().text());
 };
 
-const stripAttrsKeepTags = (html, allowedTags = ['p', 'br', 'ul', 'ol', 'li', 'strong', 'em', 'b', 'i', 'a', 'h3', 'h4']) => {
+const stripAttrsKeepTags = (
+    html,
+    allowedTags = ['p', 'br', 'ul', 'ol', 'li', 'strong', 'em', 'b', 'i', 'a', 'h3', 'h4'],
+) => {
     if (!html) return '';
     const $ = cheerio.load(html, { decodeEntities: true });
 
-    // Remove trashy/non-content and hidden elements
+    // Remove non-content & hidden elements
     $('script, style, noscript, iframe, form, button, svg, input, textarea, select').remove();
     $('[data-complaint-overlay], #complaint-popup-container, .popup, [aria-hidden="true"]').remove();
-    // Some templates put junk in .hide (beware not to remove the entire description if they use "hide" in class names)
-    // We'll specifically target hidden nodes, not generic .hide text containers:
     $('[style*="display:none"], [hidden]').remove();
 
-    // Unwrap unknown tags; keep a/href only
+    // Keep only allowed tags; drop attributes except href on <a>
     $('*').each((_, el) => {
         const name = el.name || '';
         if (!allowedTags.includes(name)) {
             $(el).replaceWith($(el).contents());
             return;
         }
-        // Drop attributes except href on <a>
         const attribs = el.attribs || {};
         for (const attr of Object.keys(attribs)) {
             if (name === 'a' && attr === 'href') continue;
@@ -62,9 +60,7 @@ const stripAttrsKeepTags = (html, allowedTags = ['p', 'br', 'ul', 'ol', 'li', 's
 
     // Normalize whitespace
     $('body').find('*').contents().each((_, node) => {
-        if (node.type === 'text' && node.data) {
-            node.data = normText(node.data);
-        }
+        if (node.type === 'text' && node.data) node.data = normText(node.data);
     });
 
     const out = $('body').html() || '';
@@ -77,14 +73,14 @@ const parseSpanishRelativeDateToISO = (s) => {
     if (!str) return null;
     const now = new Date();
 
-    // Try direct ISO-ish dates first
+    // Try direct ISO first
     const iso = str.match(/\d{4}-\d{2}-\d{2}(?:[ t]\d{2}:\d{2}(?::\d{2})?)?/);
     if (iso) {
         const d = new Date(iso[0]);
         if (!isNaN(d)) return d.toISOString();
     }
 
-    // Patterns: "hace 3 días", "hace una hora", "Publicado hace 15 minutos"
+    // "hace 3 días", "hace una hora", "hace 15 minutos"
     const rel = str.match(/hace\s+(\d+|una|un)\s+(minutos|minuto|horas|hora|días|día|semanas|semana|meses|mes|años|año)/i);
     if (rel) {
         const qtyRaw = rel[1];
@@ -105,7 +101,7 @@ const parseSpanishRelativeDateToISO = (s) => {
 };
 
 const extractLabeledValue = ($, labelRegexes) => {
-    // 1) Common list/chips
+    // 1) Chips / attributes
     let val = null;
 
     $('li, .box_attributes li, .attribute, .chip, .tag').each((_, li) => {
@@ -118,16 +114,13 @@ const extractLabeledValue = ($, labelRegexes) => {
                 if (parts.length > 1) val = normText(parts.slice(1).join(':'));
                 else {
                     const spans = $li.find('span');
-                    if (spans.length >= 2) {
-                        val = normText($(spans[1]).text());
-                    } else {
-                        val = text.replace(re, '').trim();
-                    }
+                    if (spans.length >= 2) val = normText($(spans[1]).text());
+                    else val = text.replace(re, '').trim();
                 }
-                return false; // break inner loop
+                return false;
             }
         }
-        if (val) return false; // break outer loop
+        if (val) return false;
     });
     if (val) return val;
 
@@ -169,7 +162,7 @@ const normalizeSalaryFromJsonLd = (baseSalary) => {
 
     const out = {};
     if (currency) out.salary_currency = currency;
-    if (unitText) out.salary_period = unitText; // e.g., MONTH, HOUR, YEAR
+    if (unitText) out.salary_period = unitText; // MONTH, HOUR, YEAR
     if (min != null) out.salary_min = min;
     if (max != null) out.salary_max = max;
     if (amount != null && min == null && max == null) out.salary_amount = amount;
@@ -198,7 +191,7 @@ const parseAllJsonLd = ($) => {
     return jobPostings[0] || null;
 };
 
-// Try to focus on real description containers; then sanitize.
+// Description extraction with sanitization
 const extractDescription = ($) => {
     const candidates = [
         '.box_detail [itemprop="description"]',
@@ -213,12 +206,9 @@ const extractDescription = ($) => {
         const el = $(sel).first();
         if (el && el.length && normText(el.text()).length > 20) {
             const html = stripAttrsKeepTags(el.html());
-            if (html) {
-                return { description_html: html, description_text: cleanHtmlToText(html) };
-            }
+            if (html) return { description_html: html, description_text: cleanHtmlToText(html) };
         }
     }
-    // Fallback to a bigger container, but sanitize hard
     const fallback = $('.box_detail').first();
     if (fallback && fallback.length) {
         const html = stripAttrsKeepTags(fallback.html());
@@ -253,7 +243,7 @@ const extractFromJsonLd = ($) => {
         title: item.title || item.name || null,
         company: item.hiringOrganization?.name || null,
         datePosted: item.datePosted || null,
-        description_raw: item.description || null, // sometimes HTML, sometimes text
+        description_raw: item.description || null, // can be HTML or text
         location,
         salary_struct: salaryObj,
         employmentType,
@@ -266,19 +256,19 @@ const extractJobDetail = ($, url) => {
     // Title & company
     const title = pickFirstNonEmpty(
         jsonLd.title,
-        $('h1, .box_title h1, [class*="title"]').first().text()
+        $('h1, .box_title h1, [class*="title"]').first().text(),
     );
     const company = pickFirstNonEmpty(
         jsonLd.company,
         $('.box_header .fc_base a, .box_header a, [class*="company"], [itemprop="hiringOrganization"] a')
-            .first().text()
+            .first().text(),
     );
 
     // Location
     let location = pickFirstNonEmpty(
         jsonLd.location,
         extractLabeledValue($, [/ubicaci[oó]n/i, /ciudad/i, /estado/i, /localidad/i]),
-        $('.box_header p, [class*="location"], nav.breadcrumb').first().text()
+        $('.box_header p, [class*="location"], nav.breadcrumb').first().text(),
     );
     if (location) {
         location = location.replace(/Publicado.*$/i, '').replace(/\s+\|\s+$/, '').trim();
@@ -313,9 +303,7 @@ const extractJobDetail = ($, url) => {
     let description_html = null;
     let description_text = null;
 
-    // If JSON-LD has description, try to use it if it looks like HTML and has content
     if (jsonLd.description_raw && normText(jsonLd.description_raw).length > 20) {
-        // Sometimes JSON-LD description includes tags; sanitize either way
         const sanitized = stripAttrsKeepTags(jsonLd.description_raw);
         if (sanitized && normText(cleanHtmlToText(sanitized)).length > 20) {
             description_html = sanitized;
@@ -346,6 +334,12 @@ const extractJobDetail = ($, url) => {
         job.salary_text = salary_text;
     }
 
+    // Guard against CSS-only capture (rare fallback)
+    if (job.description_html && /{.*}/.test(job.description_html) && !/<(p|ul|li|a|strong|em|br|h3|h4)/i.test(job.description_html)) {
+        job.description_html = null;
+        job.description_text = null;
+    }
+
     return job;
 };
 
@@ -353,28 +347,19 @@ const extractJobDetail = ($, url) => {
 
 const router = createCheerioRouter();
 
-router.addDefaultHandler(async ({ $, request, log, enqueueLinks, crawler }) => {
-    // If this looks like a job detail page, handle directly.
+router.addDefaultHandler(async ({ $, request, log, enqueueLinks }) => {
     const isDetail = /\/oferta-|\/job\/|\/empleo\/|\/vacante\//i.test(request.url);
+
     if (isDetail) {
         log.info(`Detail page: ${request.url}`);
         const job = extractJobDetail($, request.url);
-
-        // If description_html was polluted by CSS/selectors in the past, ensure it's clean now:
-        if (job.description_html && /{.*}/.test(job.description_html) && !/<(p|ul|li|a|strong|em|br|h3|h4)/i.test(job.description_html)) {
-            // Looks like only CSS text; nuke it
-            job.description_html = null;
-            job.description_text = null;
-        }
-
         await Dataset.pushData(job);
         return;
     }
 
-    // Otherwise assume it's a listing/search page. Enqueue detail links and pagination.
     log.info(`Listing page: ${request.url}`);
 
-    // Detail link patterns (broad to catch variants)
+    // Detail links (several patterns to catch template variants)
     await enqueueLinks({
         selector: [
             'a[href*="/oferta-"]',
@@ -386,19 +371,17 @@ router.addDefaultHandler(async ({ $, request, log, enqueueLinks, crawler }) => {
         ].join(','),
         label: 'DETAIL',
         transformRequestFunction: (req) => {
-            // normalize to absolute URLs (Crawlee does this, but ensure tracking params removed)
             try {
                 const u = new URL(req.url);
                 u.hash = '';
-                // you can strip marketing params if needed:
                 ['utm_source', 'utm_medium', 'utm_campaign', 'gclid', 'fbclid'].forEach((k) => u.searchParams.delete(k));
                 req.url = u.toString();
-            } catch { /* ignore */ }
+            } catch { /* noop */ }
             return req;
         },
     });
 
-    // Pagination links
+    // Pagination
     await enqueueLinks({
         selector: 'a[href*="page="], .pagination a, a.next, a[rel="next"]',
         forefront: false,
@@ -408,27 +391,20 @@ router.addDefaultHandler(async ({ $, request, log, enqueueLinks, crawler }) => {
 router.addHandler('DETAIL', async ({ $, request, log }) => {
     log.info(`Detail (labeled) page: ${request.url}`);
     const job = extractJobDetail($, request.url);
-
-    // Guard against CSS-only capture
-    if (job.description_html && /{.*}/.test(job.description_html) && !/<(p|ul|li|a|strong|em|br|h3|h4)/i.test(job.description_html)) {
-        job.description_html = null;
-        job.description_text = null;
-    }
-
     await Dataset.pushData(job);
 });
 
 // -------------------- Main --------------------
 
-Actor.main(async () => {
+await Actor.main(async () => {
     const input = await Actor.getInput() || {};
     const {
         startUrls = [],
         maxRequestsPerCrawl = 1000,
         maxConcurrency = 10,
-        proxy = {}, // e.g., { groups: ['SHADER'] } or { proxyUrls: ['http://user:pass@host:port'] }
-        requestTimeoutSecs = 45,
-        navigationTimeoutSecs = 30,
+        proxy = { useApifyProxy: true }, // set groups in input if needed
+        requestHandlerTimeoutSecs = 45,
+        maxRequestRetries = 2,
     } = input;
 
     // Proxy rotation
@@ -440,42 +416,40 @@ Actor.main(async () => {
         await requestQueue.addRequest({ url: s.url });
     }
 
-    // CheerioCrawler uses gotScraping under the hood (modern HTTP-based scraping).
     const crawler = new CheerioCrawler({
         requestQueue,
         maxRequestsPerCrawl,
         maxConcurrency,
         requestHandler: router,
         proxyConfiguration,
+
+        // Sessions = persistent cookies per session; auto-rotation on blocks
         useSessionPool: true,
         persistCookiesPerSession: true,
         sessionPoolOptions: {
             maxPoolSize: Math.max(8, maxConcurrency * 3),
-            sessionOptions: {
-                maxRequestRetries: 2,
-            },
+            sessionOptions: { maxRequestRetries },
         },
-        // Stealth-ish defaults with modern headers via gotScraping; customize here if needed.
+
+        // Tweak request headers a bit for stealth
         preNavigationHooks: [
-            async ({ request, session, proxies, crawler }) => {
-                // You can tweak headers further if the target gets picky.
+            async ({ request }) => {
                 request.headers['accept-language'] = request.headers['accept-language'] || 'es-ES,es;q=0.9,en;q=0.8';
                 request.headers['sec-fetch-site'] = 'same-origin';
                 request.headers['sec-fetch-mode'] = 'navigate';
                 request.headers['sec-fetch-dest'] = 'document';
-                // If site blocks aggressively, you can randomize UA:
-                // request.headers['user-agent'] = gotScrapingApis.getRandomUserAgent(); // (Crawlee already sets modern UA)
             },
         ],
-        // Retire session on common anti-bot signals
+
+        // If a request fails too many times, retire session (likely flagged)
         failedRequestHandler: async ({ request, error, session }) => {
-            log.warning(`Request ${request.url} failed too many times. Error: ${error?.message || error}`);
+            log.warning(`Request failed: ${request.url} :: ${error?.message || error}`);
             if (session) session.retire();
         },
+
         additionalMimeTypes: ['text/html', 'application/xhtml+xml'],
-        requestHandlerTimeoutSecs: requestTimeoutSecs,
-        navigationTimeoutSecs,
-        // Automatic retries are handled by Crawlee; consider lowering or raising if needed via maxRequestRetries at run-level
+        requestHandlerTimeoutSecs,
+        maxRequestRetries,
     });
 
     log.info('Starting crawler...');
