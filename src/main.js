@@ -14,18 +14,26 @@ async function main() {
         const {
             startUrls = [],
             startUrlsText = '',
+            startUrl = '',
             keyword = 'asesor-de-ventas',
+            results_wanted: RESULTS_WANTED = undefined,
+            max_pages: MAX_PAGES_LEGACY = undefined,
             maxResults: MAX_RESULTS_RAW = 100,
             maxPages: MAX_PAGES_RAW = 20,
             collectDetails = true,
             stealthMode = true,
             proxyConfiguration,
             requestDelayMs: BASE_DELAY_MS = 2000,
+            minRequestDelay = 500,
+            maxRequestDelay = 1500,
             maxConcurrency: MAX_CONCURRENCY_RAW = 3,
+            cookies = '',
+            cookiesJson = '',
         } = input;
 
-        const MAX_RESULTS = Math.max(1, Number.isFinite(+MAX_RESULTS_RAW) ? Math.floor(+MAX_RESULTS_RAW) : 100);
-        const MAX_PAGES = Math.max(1, Number.isFinite(+MAX_PAGES_RAW) ? Math.floor(+MAX_PAGES_RAW) : 20);
+    // Normalize legacy and current inputs
+    const MAX_RESULTS = Math.max(1, Number.isFinite(+ (RESULTS_WANTED ?? MAX_RESULTS_RAW)) ? Math.floor(+ (RESULTS_WANTED ?? MAX_RESULTS_RAW)) : 100);
+    const MAX_PAGES = Math.max(1, Number.isFinite(+ (MAX_PAGES_LEGACY ?? MAX_PAGES_RAW)) ? Math.floor(+ (MAX_PAGES_LEGACY ?? MAX_PAGES_RAW)) : 20);
         const MAX_CONCURRENCY = Math.max(1, Math.min(10, Number.isFinite(+MAX_CONCURRENCY_RAW) ? Math.floor(+MAX_CONCURRENCY_RAW) : 3));
 
 
@@ -53,8 +61,9 @@ async function main() {
         const getRandomAcceptLang = () => ACCEPT_LANGUAGES[Math.floor(Math.random() * ACCEPT_LANGUAGES.length)];
         const getStealthDelay = () => {
             if (!stealthMode) return 0;
-            const variance = BASE_DELAY_MS * 0.4;
-            return Math.floor(BASE_DELAY_MS - variance + Math.random() * (variance * 2));
+            const minD = Math.max(0, Number(minRequestDelay) || 0);
+            const maxD = Math.max(minD, Number(maxRequestDelay) || minD);
+            return Math.floor(minD + Math.random() * (maxD - minD + 1));
         };
 
 
@@ -80,9 +89,11 @@ async function main() {
             return `https://mx.computrabajo.com/trabajo-de-${normalized}`;
         };
 
-        // Initialize URLs (priority: startUrlsText > startUrls array > built keyword URL)
+        // Initialize URLs (priority: startUrl > startUrlsText > startUrls array > built keyword URL)
         const initialUrls = [];
-        if (typeof startUrlsText === 'string' && startUrlsText.trim().length > 0) {
+        if (typeof startUrl === 'string' && startUrl.trim().length > 0) {
+            initialUrls.push(startUrl.trim());
+        } else if (typeof startUrlsText === 'string' && startUrlsText.trim().length > 0) {
             const parsed = startUrlsText.split(/[\r\n]+/).map(s => s.trim()).filter(Boolean);
             initialUrls.push(...parsed);
         } else if (Array.isArray(startUrls) && startUrls.length > 0) {
@@ -93,6 +104,17 @@ async function main() {
         }
 
         log.info(`Starting with ${initialUrls.length} URL(s): maxResults=${MAX_RESULTS}, maxPages=${MAX_PAGES}`);
+
+        // Parse cookies if provided
+        let parsedCookies = null;
+        if (cookiesJson && typeof cookiesJson === 'string') {
+            try {
+                parsedCookies = JSON.parse(cookiesJson);
+            } catch (e) {
+                log.warning('cookiesJson is not valid JSON, ignoring');
+                parsedCookies = null;
+            }
+        }
 
         const proxyConfig = proxyConfiguration 
             ? await Actor.createProxyConfiguration({ ...proxyConfiguration })
@@ -191,6 +213,20 @@ async function main() {
         }
 
 
+        // Helper to build per-request headers
+        const buildHeaders = () => ({
+            'User-Agent': getRandomUserAgent(),
+            'Accept-Language': getRandomAcceptLang(),
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Encoding': 'gzip, deflate',
+            'DNT': '1',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'none',
+        });
+
         const crawler = new CheerioCrawler({
             proxyConfiguration: proxyConfig,
             maxRequestRetries: 3,
@@ -200,26 +236,7 @@ async function main() {
             minConcurrency: Math.max(1, Math.floor(MAX_CONCURRENCY / 2)),
             requestHandlerTimeoutSecs: 60,
             ignoreSslErrors: true,
-            prepareRequest: async ({ request }) => {
-                // Add stealth headers
-                request.headers = request.headers || {};
-                request.headers['User-Agent'] = getRandomUserAgent();
-                request.headers['Accept-Language'] = getRandomAcceptLang();
-                request.headers['Accept'] = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
-                request.headers['Accept-Encoding'] = 'gzip, deflate';
-                request.headers['DNT'] = '1';
-                request.headers['Connection'] = 'keep-alive';
-                request.headers['Upgrade-Insecure-Requests'] = '1';
-                request.headers['Sec-Fetch-Dest'] = 'document';
-                request.headers['Sec-Fetch-Mode'] = 'navigate';
-                request.headers['Sec-Fetch-Site'] = 'none';
-
-                // Add random delay
-                if (stealthMode && totalSaved > 0) {
-                    const delay = getStealthDelay();
-                    if (delay > 0) await new Promise(r => setTimeout(r, delay));
-                }
-            },
+            // Note: headers are applied per-request via initial requests and enqueueLinks transformRequestFunction
             async requestHandler({ request, $, enqueueLinks, log: logger }) {
                 const label = request.userData?.label || 'LIST';
                 const pageNum = request.userData?.pageNum || 1;
@@ -242,6 +259,14 @@ async function main() {
                                 await enqueueLinks({
                                     urls: toQueue,
                                     userData: { label: 'DETAIL' },
+                                    transformRequestFunction: (req) => {
+                                        req.headers = { ...(req.headers || {}), ...buildHeaders() };
+                                        if (stealthMode && totalSaved > 0) {
+                                            const delay = getStealthDelay();
+                                            if (delay > 0) return new Promise(res => setTimeout(() => res(req), delay));
+                                        }
+                                        return req;
+                                    }
                                 });
                                 toQueue.forEach(url => jobUrlsEnqueued.add(url));
                                 logger.info(`Queued ${toQueue.length} detail pages`);
@@ -260,6 +285,10 @@ async function main() {
                                 await enqueueLinks({
                                     urls: [nextUrl],
                                     userData: { label: 'LIST', pageNum: pageNum + 1 },
+                                    transformRequestFunction: (req) => {
+                                        req.headers = { ...(req.headers || {}), ...buildHeaders() };
+                                        return req;
+                                    }
                                 });
                                 logger.info(`Next page queued: ${nextUrl}`);
                             }
@@ -292,7 +321,14 @@ async function main() {
         log.info('Starting Computrabajo scraper...');
         const startTime = Date.now();
 
-        await crawler.run(initialUrls.map(url => ({ url, userData: { label: 'LIST', pageNum: 1 } })));
+        // Prepare initial requests with headers
+        const initialRequests = initialUrls.map(url => ({
+            url,
+            userData: { label: 'LIST', pageNum: 1 },
+            headers: buildHeaders(),
+        }));
+
+        await crawler.run(initialRequests);
 
         const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
         log.info(`✓ Saved ${totalSaved}/${MAX_RESULTS} jobs in ${elapsed}s | URLs: ${urlsVisited.size}`);

@@ -24,6 +24,12 @@
       "description": "Optional: paste one URL per line. This takes precedence over the `startUrls` select. Useful for free-form lists.",
       "editor": "textarea"
     },
+    "startUrl": {
+      "title": "Start URL",
+      "type": "string",
+      "description": "Start scraping from a specific Computrabajo search URL. If provided, this will be used instead of Keyword.",
+      "editor": "textfield"
+    },
     "maxResults": {
       "title": "Maximum Results",
       "type": "integer",
@@ -74,6 +80,50 @@
       "maximum": 5000,
       "default": 2000,
       "editor": "number"
+    },
+    "minRequestDelay": {
+      "title": "Minimum request delay (ms)",
+      "type": "integer",
+      "description": "Minimum delay between requests in milliseconds (for politeness and stealth).",
+      "minimum": 0,
+      "default": 500,
+      "editor": "number"
+    },
+    "maxRequestDelay": {
+      "title": "Maximum request delay (ms)",
+      "type": "integer",
+      "description": "Maximum delay between requests in milliseconds (random delays help avoid detection).",
+      "minimum": 0,
+      "default": 1500,
+      "editor": "number"
+    },
+    "results_wanted": {
+      "title": "Maximum number of jobs",
+      "type": "integer",
+      "description": "The maximum number of jobs to collect. Leave empty to collect all available jobs.",
+      "minimum": 1,
+      "default": 100,
+      "editor": "number"
+    },
+    "max_pages": {
+      "title": "Maximum number of pages",
+      "type": "integer",
+      "description": "A safety cap on the number of search result pages to visit.",
+      "minimum": 1,
+      "editor": "number",
+      "default": 20
+    },
+    "cookies": {
+      "title": "Custom cookies (raw header)",
+      "type": "string",
+      "description": "Optional raw 'Cookie' header string. Can help bypass consent banners.",
+      "editor": "textfield"
+    },
+    "cookiesJson": {
+      "title": "Custom cookies (JSON)",
+      "type": "string",
+      "description": "Optional JSON-formatted cookies. Accepts an array (e.g., [{\"name\":\"a\",\"value\":\"1\"}]) or an object map (e.g., {\"a\":\"1\"}).",
+      "editor": "textarea"
     },
     "maxConcurrency": {
       "title": "Max Concurrent Requests",
