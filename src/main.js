@@ -357,97 +357,127 @@ const extractJobDetail = ($, url) => {
     const jsonLd = extractFromJsonLd($);
 
     // ========== TITLE ==========
-    // Priority: JSON-LD > .title_offer class > h1 fallback
     let title = null;
     if (jsonLd.title) {
         title = normText(jsonLd.title);
     }
     if (!title) {
-        // Exact class from Computrabajo
-        const titleEl = $('.title_offer.fs21.fwB.lh1_2');
-        if (titleEl.length) {
-            title = normText(titleEl.text());
-        }
-    }
-    if (!title) {
-        // Fallback to any h1
-        const h1 = $('h1').first();
-        if (h1.length) {
-            title = normText(h1.text());
+        // Multiple strategies for title - use contains class to handle dynamic classes
+        const titleSelectors = [
+            '[class*="title_offer"]',
+            '.title_offer',
+            'h1[class*="title"]',
+            'h1.fs21',
+            '.box_title h1',
+            'h1',
+        ];
+        for (const sel of titleSelectors) {
+            const el = $(sel).first();
+            if (el.length) {
+                const txt = normText(el.text());
+                if (txt && txt.length > 3) {
+                    title = txt;
+                    break;
+                }
+            }
         }
     }
 
     // ========== COMPANY ==========
-    // Priority: JSON-LD > .dIB.mr10 link > pickCompanyFromDom > microdata
     let company = null;
     if (jsonLd.company) {
         company = cleanCompanyName(jsonLd.company);
     }
     if (!company) {
-        // Exact class from Computrabajo (company link in header)
-        const companyLink = $('a.dIB.mr10');
-        if (companyLink.length) {
-            company = cleanCompanyName(companyLink.text());
+        // Multiple strategies - look for company in header area
+        const companySelectors = [
+            '.box_header a[href*="/empresas/"]',
+            '.box_header a[href*="/empresa"]',
+            'a.dIB.mr10',
+            'a[class*="mr10"]',
+            '.box_header .fc_base a',
+            '[itemprop="hiringOrganization"] [itemprop="name"]',
+        ];
+        for (const sel of companySelectors) {
+            const el = $(sel).first();
+            if (el.length) {
+                const txt = cleanCompanyName(el.text());
+                if (txt && txt.length > 1) {
+                    company = txt;
+                    break;
+                }
+            }
         }
     }
     if (!company) {
-        // Try other company selectors
         company = pickCompanyFromDom($);
-    }
-    if (!company) {
-        // Try microdata
-        const microCompany = $('[itemprop="hiringOrganization"] [itemprop="name"]').first();
-        if (microCompany.length) {
-            company = cleanCompanyName(microCompany.text());
-        }
     }
 
     // ========== LOCATION ==========
-    // Priority: JSON-LD > .fs16.mb5 > pickLocation > microdata > breadcrumb
     let location = null;
     if (jsonLd.location) {
         location = normText(jsonLd.location);
     }
     if (!location) {
-        // Exact class from Computrabajo
-        const locEl = $('.fs16.mb5');
-        if (locEl.length) {
-            let locText = normText(locEl.text());
-            // Clean up location text (remove extra info)
-            locText = locText.replace(/\s*-\s*Publicado.*$/i, '').replace(/Ver mapa/gi, '').trim();
-            if (locText) location = locText;
+        // Multiple strategies for location
+        const locationSelectors = [
+            '.fs16.mb5',
+            '[class*="mb5"]',
+            '.box_header p.fs16',
+            '.box_header p',
+            '[itemprop="jobLocation"] [itemprop="addressLocality"]',
+            'p:contains("Ubicación")',
+        ];
+        for (const sel of locationSelectors) {
+            const el = $(sel).first();
+            if (el.length) {
+                let txt = normText(el.text());
+                // Clean up
+                txt = txt
+                    .replace(/Ubicación:?/gi, '')
+                    .replace(/\s*-\s*Publicado.*$/i, '')
+                    .replace(/Ver mapa/gi, '')
+                    .replace(/Postular.*/i, '')
+                    .trim();
+                if (txt && txt.length > 2) {
+                    location = txt;
+                    break;
+                }
+            }
         }
     }
     if (!location) {
-        // Try pickLocation helper
-        location = pickLocation($, $('.box_header p').first().text());
-    }
-    if (!location) {
-        // Try microdata
-        const microLoc = $('[itemprop="jobLocation"] [itemprop="addressLocality"]').first();
-        if (microLoc.length) {
-            location = normText(microLoc.text());
-        }
+        location = pickLocation($, null);
     }
 
     // ========== DATE POSTED ==========
-    // Priority: JSON-LD > .fc_aux.fs13.mtB > extractLabeledValue
     let datePosted = null;
     if (jsonLd.datePosted) {
         datePosted = jsonLd.datePosted;
     }
     if (!datePosted) {
-        // Exact class from Computrabajo
-        const dateEl = $('.fc_aux.fs13.mtB');
-        if (dateEl.length) {
-            const dateText = normText(dateEl.text());
-            // Try to parse relative date (e.g., "hace 2 días")
-            const iso = parseSpanishRelativeDateToISO(dateText);
-            datePosted = iso || dateText;
+        // Multiple strategies for date
+        const dateSelectors = [
+            '.fc_aux.fs13.mtB',
+            '[class*="fc_aux"]',
+            '.box_header .fc_aux',
+            'p.fs13',
+            'p:contains("Publicado")',
+            'p:contains("hace")',
+        ];
+        for (const sel of dateSelectors) {
+            const el = $(sel).first();
+            if (el.length) {
+                const txt = normText(el.text());
+                if (txt && (txt.includes('hace') || txt.includes('Publicado'))) {
+                    const iso = parseSpanishRelativeDateToISO(txt);
+                    datePosted = iso || txt;
+                    break;
+                }
+            }
         }
     }
     if (!datePosted) {
-        // Try labeled value extraction
         const rel = extractLabeledValue($, [/publicado/i, /publicada/i, /fecha/i]);
         if (rel) {
             const iso = parseSpanishRelativeDateToISO(rel);
@@ -456,7 +486,6 @@ const extractJobDetail = ($, url) => {
     }
 
     // ========== EMPLOYMENT TYPE ==========
-    // Priority: JSON-LD > .dFlex.mb10 > extractLabeledValue
     let employmentType = null;
     if (jsonLd.employmentType) {
         employmentType = Array.isArray(jsonLd.employmentType) 
@@ -464,24 +493,32 @@ const extractJobDetail = ($, url) => {
             : jsonLd.employmentType;
     }
     if (!employmentType) {
-        // Exact class from Computrabajo
-        const typeEl = $('.dFlex.mb10');
-        if (typeEl.length) {
-            // This element may contain multiple spans; extract all text
-            let typeText = normText(typeEl.text());
-            // Clean up (remove labels like "Jornada:")
-            typeText = typeText.replace(/^(Jornada|Tipo de contrato|Modalidad):\s*/i, '').trim();
-            if (typeText) employmentType = typeText;
+        // Multiple strategies
+        const typeSelectors = [
+            '.dFlex.mb10',
+            '[class*="dFlex"]',
+            'p:contains("Jornada")',
+            'p:contains("Tiempo completo")',
+            'p:contains("Tiempo parcial")',
+        ];
+        for (const sel of typeSelectors) {
+            const el = $(sel).first();
+            if (el.length) {
+                let txt = normText(el.text());
+                txt = txt.replace(/^(Jornada|Tipo de contrato|Modalidad):\s*/i, '').trim();
+                if (txt && txt.length > 3) {
+                    employmentType = txt;
+                    break;
+                }
+            }
         }
     }
     if (!employmentType) {
-        // Try labeled extraction
         const jornada = extractLabeledValue($, [/jornada/i, /tipo de contrato/i, /modalidad/i]);
         if (jornada) employmentType = jornada;
     }
 
     // ========== SALARY ==========
-    // Priority: JSON-LD structured > extractLabeledValue
     let salary_struct = jsonLd.salary_struct || null;
     let salary_text = null;
     if (!salary_struct) {
@@ -492,7 +529,6 @@ const extractJobDetail = ($, url) => {
     }
 
     // ========== DESCRIPTION ==========
-    // Priority: JSON-LD > .fs16.t_word_wrap > pickDescriptionHtml
     let description_html = null;
     let description_text = null;
 
@@ -505,24 +541,42 @@ const extractJobDetail = ($, url) => {
     }
     
     if (!description_html) {
-        // Exact class from Computrabajo
-        const descEl = $('.fs16.t_word_wrap');
-        if (descEl.length) {
-            let html = descEl.html();
-            if (html) {
-                // Remove hidden/unwanted elements
-                const $temp = cheerioLoad(html);
-                $temp('.hide, [data-offers-grid-detail-container-error], [data-complaint-overlay], .popup, #complaint-popup-container, [aria-hidden="true"]').remove();
-                $temp('script, style, noscript').remove();
-                
-                description_html = stripAttrsKeepTags($temp.root().html());
-                description_text = cleanHtmlToText(description_html);
+        // Multiple strategies for description
+        const descSelectors = [
+            '[class*="t_word_wrap"]',
+            '.fs16.t_word_wrap',
+            '[itemprop="description"]',
+            '.box_detail',
+            '.box_section',
+            'article.oferta',
+            '#offer-body',
+        ];
+        
+        for (const sel of descSelectors) {
+            const descEl = $(sel).first();
+            if (descEl.length) {
+                let html = descEl.html();
+                if (html && normText(cheerioLoad(html).text()).length > 40) {
+                    // Remove hidden/unwanted elements
+                    const $temp = cheerioLoad(html);
+                    $temp('.hide, [data-offers-grid-detail-container-error], [data-complaint-overlay], .popup, #complaint-popup-container, [aria-hidden="true"]').remove();
+                    $temp('script, style, noscript, iframe, form, button').remove();
+                    
+                    const cleaned = stripAttrsKeepTags($temp.root().html());
+                    const txt = cleanHtmlToText(cleaned);
+                    
+                    if (cleaned && txt && normText(txt).length > 40) {
+                        description_html = cleaned;
+                        description_text = txt;
+                        break;
+                    }
+                }
             }
         }
     }
     
     if (!description_html) {
-        // Fallback to pickDescriptionHtml
+        // Final fallback to pickDescriptionHtml
         const html = pickDescriptionHtml($);
         if (html) {
             description_html = html;
@@ -555,6 +609,16 @@ const extractJobDetail = ($, url) => {
     } else if (salary_text) {
         job.salary_text = salary_text;
     }
+
+    // Debug logging to help troubleshoot
+    log.debug(`Extraction results for ${url}:`);
+    log.debug(`  - Title: ${title ? '✓' : '✗'} ${title ? `(${title.substring(0, 50)}...)` : ''}`);
+    log.debug(`  - Company: ${company ? '✓' : '✗'} ${company || ''}`);
+    log.debug(`  - Location: ${location ? '✓' : '✗'} ${location || ''}`);
+    log.debug(`  - Date: ${datePosted ? '✓' : '✗'} ${datePosted || ''}`);
+    log.debug(`  - Employment Type: ${employmentType ? '✓' : '✗'} ${employmentType || ''}`);
+    log.debug(`  - Salary: ${(salary_text || salary_struct) ? '✓' : '✗'}`);
+    log.debug(`  - Description: ${description_text ? '✓' : '✗'} ${description_text ? `(${description_text.substring(0, 50)}...)` : ''}`);
 
     return job;
 };
