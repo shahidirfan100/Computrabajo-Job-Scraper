@@ -677,6 +677,26 @@ let maxResultsDesired = 1000; // Default, will be overridden by input
 const router = createCheerioRouter();
 
 router.addDefaultHandler(async ({ $, request, log, enqueueLinks }) => {
+    // Check if we're being blocked or redirected
+    const pageTitle = $('title').text().toLowerCase();
+    const bodyText = $('body').text().toLowerCase();
+    
+    // Detect blocking/redirect pages
+    const isBlockedOrRedirect = 
+        pageTitle.includes('sign in') ||
+        pageTitle.includes('iniciar sesión') ||
+        bodyText.includes('continue with google') ||
+        bodyText.includes('iniciar sesión') ||
+        bodyText.includes('crear cuenta') ||
+        $('input[type="password"]').length > 0 ||
+        $('form[action*="login"]').length > 0;
+    
+    if (isBlockedOrRedirect) {
+        log.warning(`⚠️ Blocked/redirected page detected: ${request.url}`);
+        log.warning(`Page title: ${pageTitle}`);
+        throw new Error('Blocked or redirected to login page - rotating session');
+    }
+
     const isDetail = /\/oferta-|\/job\/|\/empleo\/|\/vacante\//i.test(request.url);
 
     if (isDetail) {
@@ -687,7 +707,33 @@ router.addDefaultHandler(async ({ $, request, log, enqueueLinks }) => {
         }
 
         log.info(`[DETAIL] Processing: ${request.url}`);
+        
+        // Validate this is actually a job detail page
+        const hasJobContent = 
+            $('h1').length > 0 ||
+            $('[class*="title"]').length > 0 ||
+            $('script[type="application/ld+json"]').length > 0;
+        
+        if (!hasJobContent) {
+            log.warning(`⚠️ No job content found on ${request.url} - might be blocked`);
+            throw new Error('No job content detected - rotating session');
+        }
+        
         const job = extractJobDetail($, request.url);
+        
+        // Validate extracted data makes sense (not blocked/redirect page text)
+        const hasValidData = job.title && 
+            job.title.length < 200 &&
+            !job.title.toLowerCase().includes('sign in') &&
+            !job.title.toLowerCase().includes('job openings in') &&
+            !job.title.toLowerCase().includes('crear cuenta') &&
+            !job.title.toLowerCase().includes('iniciar sesión');
+        
+        if (!hasValidData) {
+            log.warning(`⚠️ Invalid data extracted from ${request.url} - likely blocked`);
+            log.warning(`Got title: ${job.title}`);
+            throw new Error('Invalid data extracted - rotating session');
+        }
         
         // Validate job data quality before saving
         if (job && job.title) {
@@ -711,6 +757,12 @@ router.addDefaultHandler(async ({ $, request, log, enqueueLinks }) => {
     }
 
     log.info(`[LIST] Processing: ${request.url} (${totalJobsSaved}/${maxResultsDesired} saved)`);
+
+    // Validate listing page
+    if (isBlockedOrRedirect) {
+        log.warning(`⚠️ Blocked on listing page: ${request.url}`);
+        throw new Error('Blocked or redirected - rotating session');
+    }
 
     // Only enqueue more detail links if we haven't reached the limit
     if (totalJobsSaved < maxResultsDesired) {
@@ -756,8 +808,50 @@ router.addHandler('DETAIL', async ({ $, request, log }) => {
         return;
     }
 
+    // Check if we're being blocked or redirected
+    const pageTitle = $('title').text().toLowerCase();
+    const bodyText = $('body').text().toLowerCase();
+    
+    const isBlockedOrRedirect = 
+        pageTitle.includes('sign in') ||
+        pageTitle.includes('iniciar sesión') ||
+        bodyText.includes('continue with google') ||
+        bodyText.includes('iniciar sesión') ||
+        bodyText.includes('crear cuenta') ||
+        $('input[type="password"]').length > 0;
+    
+    if (isBlockedOrRedirect) {
+        log.warning(`⚠️ Blocked/redirected (DETAIL labeled): ${request.url}`);
+        throw new Error('Blocked or redirected to login page - rotating session');
+    }
+
     log.info(`[DETAIL-LABELED] Processing: ${request.url}`);
+    
+    // Validate this is actually a job detail page
+    const hasJobContent = 
+        $('h1').length > 0 ||
+        $('[class*="title"]').length > 0 ||
+        $('script[type="application/ld+json"]').length > 0;
+    
+    if (!hasJobContent) {
+        log.warning(`⚠️ No job content found on ${request.url}`);
+        throw new Error('No job content detected - rotating session');
+    }
+    
     const job = extractJobDetail($, request.url);
+    
+    // Validate extracted data
+    const hasValidData = job.title && 
+        job.title.length < 200 &&
+        !job.title.toLowerCase().includes('sign in') &&
+        !job.title.toLowerCase().includes('job openings in') &&
+        !job.title.toLowerCase().includes('crear cuenta');
+    
+    if (!hasValidData) {
+        log.warning(`⚠️ Invalid data (DETAIL labeled): ${request.url}`);
+        log.warning(`Got title: ${job.title}`);
+        throw new Error('Invalid data extracted - rotating session');
+    }
     
     // Validate job data quality before saving
     if (job && job.title) {
@@ -785,21 +879,21 @@ await Actor.main(async () => {
     const input = await Actor.getInput() || {};
     const {
         maxRequestsPerCrawl = 1000,
-        maxConcurrency = 10,
-        proxy = { useApifyProxy: true }, // customize groups in input
-        requestHandlerTimeoutSecs = 45,
-        maxRequestRetries = 2, // crawler-level retries
-        results_wanted = 50, // Number of job results desired
+        maxConcurrency = 3, // Lower concurrency to avoid blocking
+        proxy = { useApifyProxy: true, apifyProxyGroups: ['RESIDENTIAL'] }, // Use residential proxies
+        requestHandlerTimeoutSecs = 60, // Increased timeout
+        maxRequestRetries = 3, // More retries for blocks
+        results_wanted = 50,
     } = input;
 
     // Set global results limit
     maxResultsDesired = Math.max(1, Math.floor(Number(results_wanted) || 50));
     totalJobsSaved = 0;
-    log.info(`Target: ${maxResultsDesired} jobs`);
+    log.info(`🎯 Target: ${maxResultsDesired} jobs`);
 
     // Normalize & validate start requests
     const startRequests = normalizeStartRequests(input);
-    log.info(`Loaded ${startRequests.length} start URL(s).`);
+    log.info(`📋 Loaded ${startRequests.length} start URL(s).`);
     if (startRequests.length === 0) {
         throw new Error('No valid start URLs found in input. Provide startUrls (array of {url} or strings), or startUrl/urls/requests.');
     }
@@ -811,7 +905,18 @@ await Actor.main(async () => {
     const requestQueue = await RequestQueue.open();
     for (const r of startRequests) await requestQueue.addRequest(r);
 
-    // Crawler
+    // Realistic user agents (recent browsers)
+    const USER_AGENTS = [
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:120.0) Gecko/20100101 Firefox/120.0',
+    ];
+
+    const getRandomUserAgent = () => USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+
+    // Crawler with enhanced anti-bot measures
     const crawler = new CheerioCrawler({
         requestQueue,
         maxRequestsPerCrawl,
@@ -822,30 +927,75 @@ await Actor.main(async () => {
         useSessionPool: true,
         persistCookiesPerSession: true,
         sessionPoolOptions: {
-            maxPoolSize: Math.max(8, maxConcurrency * 3),
-            // Don't pass invalid keys here; maxRequestRetries is set at crawler level.
+            maxPoolSize: 50,
+            sessionOptions: {
+                maxUsageCount: 10, // Rotate session after 10 requests
+                maxErrorScore: 3, // Retire session after 3 errors
+            },
         },
 
-        // Gentle header tweaks; Crawlee/gotScraping already does a lot
+        // Enhanced request preparation with anti-bot headers
         preNavigationHooks: [
-            async ({ request }) => {
-                request.headers['accept-language'] = request.headers['accept-language'] || 'es-ES,es;q=0.9,en;q=0.8';
-                request.headers['sec-fetch-site'] = 'same-origin';
-                request.headers['sec-fetch-mode'] = 'navigate';
-                request.headers['sec-fetch-dest'] = 'document';
+            async ({ request, session }) => {
+                // Rotate user agent per session
+                if (!session.userData.userAgent) {
+                    session.userData.userAgent = getRandomUserAgent();
+                }
+                
+                // Set realistic browser headers
+                request.headers = {
+                    'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                    'accept-language': 'es-MX,es;q=0.9,en;q=0.8',
+                    'accept-encoding': 'gzip, deflate, br',
+                    'user-agent': session.userData.userAgent,
+                    'sec-ch-ua': '"Google Chrome";v="119", "Chromium";v="119", "Not?A_Brand";v="24"',
+                    'sec-ch-ua-mobile': '?0',
+                    'sec-ch-ua-platform': '"Windows"',
+                    'sec-fetch-dest': 'document',
+                    'sec-fetch-mode': 'navigate',
+                    'sec-fetch-site': 'none',
+                    'sec-fetch-user': '?1',
+                    'upgrade-insecure-requests': '1',
+                    'cache-control': 'max-age=0',
+                };
+                
+                // Add referer for detail pages
+                if (request.userData?.label === 'DETAIL') {
+                    request.headers['referer'] = 'https://mx.computrabajo.com/';
+                    request.headers['sec-fetch-site'] = 'same-origin';
+                }
+                
+                // Random delay between requests (500-2000ms)
+                const delay = 500 + Math.random() * 1500;
+                await new Promise(resolve => setTimeout(resolve, delay));
             },
         ],
 
-        failedRequestHandler: async ({ request, error, session }) => {
-            log.warning(`Request failed: ${request.url} :: ${error?.message || error}`);
-            if (session) session.retire();
+        failedRequestHandler: async ({ request, error, session, log }) => {
+            log.warning(`❌ Request failed: ${request.url}`);
+            log.warning(`Error: ${error?.message || error}`);
+            
+            // Retire session if blocked
+            if (session && (
+                error.message?.includes('Blocked') ||
+                error.message?.includes('Invalid data') ||
+                error.message?.includes('rotating session')
+            )) {
+                log.warning(`🔄 Retiring session due to blocking`);
+                session.retire();
+            }
         },
 
         requestHandlerTimeoutSecs,
         maxRequestRetries,
     });
 
-    log.info('Starting crawler...');
+    log.info('🚀 Starting crawler...');
+    const startTime = Date.now();
+    
     await crawler.run();
-    log.info(`✓ Crawler finished. Saved ${totalJobsSaved}/${maxResultsDesired} jobs.`);
+    
+    const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
+    log.info(`✅ Crawler finished. Saved ${totalJobsSaved}/${maxResultsDesired} jobs in ${elapsed} minutes.`);
 });
+
