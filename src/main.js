@@ -1,17 +1,12 @@
-// src/main.js (ESM)
-// Apify SDK + Crawlee (CheerioCrawler) + gotScraping (HTTP-based), ESM compatible.
-// Includes: proxy rotation, session pool, robust start URL parsing, and resilient extractors
-// for company, location, datePosted, employmentType, salary, description_html/text.
-
-import { Actor } from 'apify';
-import {
-    CheerioCrawler,
-    createCheerioRouter,
-    Dataset,
-    log,
-    RequestQueue,
-} from 'crawlee';
+/**
+ * Computrabajo Job Scraper for Apify
+ * Enhanced with anti-bot detection, session rotation, and clean data extraction
+ */
+import { Actor, log } from 'apify';
+import { CheerioCrawler, Dataset, RequestQueue } from 'crawlee';
 import { load as cheerioLoad } from 'cheerio';
+
+await Actor.init();
 
 // -------------------- Helpers: text utils --------------------
 
@@ -668,15 +663,12 @@ const normalizeStartRequests = (input) => {
     return out;
 };
 
-// -------------------- Router --------------------
-
-// Global state for tracking results
+// -------------------- Global tracking --------------------
 let totalJobsSaved = 0;
-let maxResultsDesired = 1000; // Default, will be overridden by input
+let maxResultsDesired = 1000;
 
-const router = createCheerioRouter();
-
-router.addDefaultHandler(async ({ $, request, log, enqueueLinks }) => {
+// -------------------- Request Handler --------------------
+const requestHandler = async ({ $, request, log, enqueueLinks, session }) => {
     // Check if we're being blocked or redirected
     const pageTitle = $('title').text().toLowerCase();
     const bodyText = $('body').text().toLowerCase();
@@ -799,79 +791,7 @@ router.addDefaultHandler(async ({ $, request, log, enqueueLinks }) => {
     } else {
         log.info(`✓ Target reached (${totalJobsSaved}/${maxResultsDesired}), stopping pagination`);
     }
-});
-
-router.addHandler('DETAIL', async ({ $, request, log }) => {
-    // Skip if we've already saved enough
-    if (totalJobsSaved >= maxResultsDesired) {
-        log.info(`✓ Limit reached (${totalJobsSaved}/${maxResultsDesired}), skipping ${request.url}`);
-        return;
-    }
-
-    // Check if we're being blocked or redirected
-    const pageTitle = $('title').text().toLowerCase();
-    const bodyText = $('body').text().toLowerCase();
-    
-    const isBlockedOrRedirect = 
-        pageTitle.includes('sign in') ||
-        pageTitle.includes('iniciar sesión') ||
-        bodyText.includes('continue with google') ||
-        bodyText.includes('iniciar sesión') ||
-        bodyText.includes('crear cuenta') ||
-        $('input[type="password"]').length > 0;
-    
-    if (isBlockedOrRedirect) {
-        log.warning(`⚠️ Blocked/redirected (DETAIL labeled): ${request.url}`);
-        throw new Error('Blocked or redirected to login page - rotating session');
-    }
-
-    log.info(`[DETAIL-LABELED] Processing: ${request.url}`);
-    
-    // Validate this is actually a job detail page
-    const hasJobContent = 
-        $('h1').length > 0 ||
-        $('[class*="title"]').length > 0 ||
-        $('script[type="application/ld+json"]').length > 0;
-    
-    if (!hasJobContent) {
-        log.warning(`⚠️ No job content found on ${request.url}`);
-        throw new Error('No job content detected - rotating session');
-    }
-    
-    const job = extractJobDetail($, request.url);
-    
-    // Validate extracted data
-    const hasValidData = job.title && 
-        job.title.length < 200 &&
-        !job.title.toLowerCase().includes('sign in') &&
-        !job.title.toLowerCase().includes('job openings in') &&
-        !job.title.toLowerCase().includes('crear cuenta');
-    
-    if (!hasValidData) {
-        log.warning(`⚠️ Invalid data (DETAIL labeled): ${request.url}`);
-        log.warning(`Got title: ${job.title}`);
-        throw new Error('Invalid data extracted - rotating session');
-    }
-    
-    // Validate job data quality before saving
-    if (job && job.title) {
-        await Dataset.pushData(job);
-        totalJobsSaved++;
-        log.info(`✓ [${totalJobsSaved}/${maxResultsDesired}] Saved: "${job.title}" @ ${job.company || 'N/A'}`);
-        
-        // Log data quality info
-        const fields = [];
-        if (job.company) fields.push('company');
-        if (job.location) fields.push('location');
-        if (job.datePosted) fields.push('date');
-        if (job.employmentType) fields.push('type');
-        if (job.salary_text || job.salary_amount) fields.push('salary');
-        if (job.description_text) fields.push('desc');
-        log.info(`  Fields: [${fields.join(', ')}]`);
-    } else {
-        log.warning(`✗ No valid title found for ${request.url}, skipping`);
-    }
-});
+};
 
 // -------------------- Main --------------------
 
@@ -921,7 +841,7 @@ await Actor.main(async () => {
         requestQueue,
         maxRequestsPerCrawl,
         maxConcurrency,
-        requestHandler: router,
+        requestHandler,
         proxyConfiguration,
 
         useSessionPool: true,
