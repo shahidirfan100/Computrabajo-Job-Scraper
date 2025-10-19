@@ -356,17 +356,23 @@ const extractJobDetail = ($, url) => {
     const jsonLd = extractFromJsonLd($);
 
     // --- Title & company ---
+    // Title: Use specific Computrabajo class
     const title = pickFirstNonEmpty(
         jsonLd.title,
+        $('.title_offer.fs21.fwB.lh1_2').first().text(),
         $('h1, .box_title h1, [class*="title"]').first().text(),
     );
 
-    let company = jsonLd.company || pickCompanyFromDom($);
+    // Company: Use specific Computrabajo class, fallback to other methods
+    let company = jsonLd.company 
+        || $('a.dIB.mr10').first().text()
+        || pickCompanyFromDom($);
     company = cleanCompanyName(company);
 
     // --- Location ---
     let location = pickLocation($,
-        $('.box_header p, [class*="location"], nav.breadcrumb').first().text()
+        $('.fs16.mb5').first().text()
+        || $('.box_header p, [class*="location"], nav.breadcrumb').first().text()
     );
 
     // --- Salary ---
@@ -378,23 +384,37 @@ const extractJobDetail = ($, url) => {
     }
 
     // --- Employment type ---
+    // Use specific Computrabajo class for employment type
     let employmentType = jsonLd.employmentType || null;
     if (!employmentType) {
-        const tipoContrato = extractLabeledValue($, [/tipo de contrato/i, /contrato/i]);
-        const jornada = extractLabeledValue($, [/jornada/i, /horario/i, /modalidad/i]);
-        const types = [tipoContrato, jornada].map(normText).filter(Boolean);
-        if (types.length) employmentType = Array.from(new Set(types));
+        const dFlexText = $('.dFlex.mb10').first().text();
+        if (dFlexText) {
+            employmentType = normText(dFlexText);
+        } else {
+            const tipoContrato = extractLabeledValue($, [/tipo de contrato/i, /contrato/i]);
+            const jornada = extractLabeledValue($, [/jornada/i, /horario/i, /modalidad/i]);
+            const types = [tipoContrato, jornada].map(normText).filter(Boolean);
+            if (types.length) employmentType = Array.from(new Set(types));
+        }
     }
 
     // --- Date posted ---
+    // Use specific Computrabajo class for date posted
     let datePosted = jsonLd.datePosted || null;
     if (!datePosted) {
-        const rel = extractLabeledValue($, [/publicado/i, /fecha de publicaci[oó]n/i]);
-        const iso = parseSpanishRelativeDateToISO(rel);
-        datePosted = iso || null;
+        const dateText = $('.fc_aux.fs13.mtB').first().text();
+        if (dateText) {
+            const iso = parseSpanishRelativeDateToISO(dateText);
+            datePosted = iso || normText(dateText) || null;
+        } else {
+            const rel = extractLabeledValue($, [/publicado/i, /fecha de publicaci[oó]n/i]);
+            const iso = parseSpanishRelativeDateToISO(rel);
+            datePosted = iso || null;
+        }
     }
 
     // --- Description ---
+    // Use specific Computrabajo class for description, keep HTML formatting
     let description_html = null;
     let description_text = null;
 
@@ -406,10 +426,20 @@ const extractJobDetail = ($, url) => {
         }
     }
     if (!description_html) {
-        const html = pickDescriptionHtml($);
+        // Try specific class first
+        let descEl = $('.fs16.t_word_wrap').first();
+        let html = descEl.length ? descEl.html() : null;
+        
+        if (!html) {
+            html = pickDescriptionHtml($);
+        }
+        
         if (html) {
-            description_html = html;
-            description_text = cleanHtmlToText(html);
+            // Remove hidden elements and popups
+            const $ = cheerioLoad(html);
+            $('[data-offers-grid-detail-container-error], .hide, [data-complaint-overlay], .popup, #complaint-popup-container').remove();
+            description_html = $.root().html();
+            description_text = cleanHtmlToText(description_html);
         }
     }
 
@@ -484,6 +514,10 @@ const normalizeStartRequests = (input) => {
 
 // -------------------- Router --------------------
 
+// Global state for tracking results
+let totalJobsSaved = 0;
+let maxResultsDesired = 1000; // Default, will be overridden by input
+
 const router = createCheerioRouter();
 
 router.addDefaultHandler(async ({ $, request, log, enqueueLinks }) => {
@@ -492,46 +526,65 @@ router.addDefaultHandler(async ({ $, request, log, enqueueLinks }) => {
     if (isDetail) {
         log.info(`Detail page: ${request.url}`);
         const job = extractJobDetail($, request.url);
-        await Dataset.pushData(job);
+        if (job && job.title) {
+            await Dataset.pushData(job);
+            totalJobsSaved++;
+            log.info(`[${totalJobsSaved}/${maxResultsDesired}] Saved: ${job.title}`);
+        }
         return;
     }
 
-    log.info(`Listing page: ${request.url}`);
+    log.info(`Listing page: ${request.url} (${totalJobsSaved}/${maxResultsDesired} saved)`);
 
-    // Detail links (several patterns to catch template variants)
-    await enqueueLinks({
-        selector: [
-            'a[href*="/oferta-"]',
-            'a[href*="/ofertas-"]',
-            'a[href*="/vacante-"]',
-            'a[href*="/job/"]',
-            'a.js-o-link',
-            'a[href*="/empleo/"]',
-            'a[href*="/trabajo-"]',
-        ].join(','),
-        label: 'DETAIL',
-        transformRequestFunction: (req) => {
-            try {
-                const u = new URL(req.url);
-                u.hash = '';
-                ['utm_source', 'utm_medium', 'utm_campaign', 'gclid', 'fbclid'].forEach((k) => u.searchParams.delete(k));
-                req.url = u.toString();
-            } catch { /* noop */ }
-            return req;
-        },
-    });
+    // Only enqueue more detail links if we haven't reached the limit
+    if (totalJobsSaved < maxResultsDesired) {
+        // Detail links (several patterns to catch template variants)
+        await enqueueLinks({
+            selector: [
+                'a[href*="/oferta-"]',
+                'a[href*="/ofertas-"]',
+                'a[href*="/vacante-"]',
+                'a[href*="/job/"]',
+                'a.js-o-link',
+                'a[href*="/empleo/"]',
+                'a[href*="/trabajo-"]',
+            ].join(','),
+            label: 'DETAIL',
+            transformRequestFunction: (req) => {
+                try {
+                    const u = new URL(req.url);
+                    u.hash = '';
+                    ['utm_source', 'utm_medium', 'utm_campaign', 'gclid', 'fbclid'].forEach((k) => u.searchParams.delete(k));
+                    req.url = u.toString();
+                } catch { /* noop */ }
+                return req;
+            },
+        });
 
-    // Pagination
-    await enqueueLinks({
-        selector: 'a[href*="page="], .pagination a, a.next, a[rel="next"]',
-        forefront: false,
-    });
+        // Pagination - but only if we still need more results
+        if (totalJobsSaved < maxResultsDesired) {
+            await enqueueLinks({
+                selector: 'a[href*="page="], .pagination a, a.next, a[rel="next"]',
+                forefront: false,
+            });
+        }
+    }
 });
 
 router.addHandler('DETAIL', async ({ $, request, log }) => {
+    // Skip if we've already saved enough
+    if (totalJobsSaved >= maxResultsDesired) {
+        log.info(`Limit reached (${totalJobsSaved}/${maxResultsDesired}), skipping ${request.url}`);
+        return;
+    }
+
     log.info(`Detail (labeled) page: ${request.url}`);
     const job = extractJobDetail($, request.url);
-    await Dataset.pushData(job);
+    if (job && job.title) {
+        await Dataset.pushData(job);
+        totalJobsSaved++;
+        log.info(`[${totalJobsSaved}/${maxResultsDesired}] Saved: ${job.title}`);
+    }
 });
 
 // -------------------- Main --------------------
@@ -544,7 +597,13 @@ await Actor.main(async () => {
         proxy = { useApifyProxy: true }, // customize groups in input
         requestHandlerTimeoutSecs = 45,
         maxRequestRetries = 2, // crawler-level retries
+        results_wanted = 50, // Number of job results desired
     } = input;
+
+    // Set global results limit
+    maxResultsDesired = Math.max(1, Math.floor(Number(results_wanted) || 50));
+    totalJobsSaved = 0;
+    log.info(`Target: ${maxResultsDesired} jobs`);
 
     // Normalize & validate start requests
     const startRequests = normalizeStartRequests(input);
@@ -596,5 +655,5 @@ await Actor.main(async () => {
 
     log.info('Starting crawler...');
     await crawler.run();
-    log.info('Crawler finished.');
+    log.info(`✓ Crawler finished. Saved ${totalJobsSaved}/${maxResultsDesired} jobs.`);
 });
