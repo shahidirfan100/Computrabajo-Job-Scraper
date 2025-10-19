@@ -353,68 +353,146 @@ const extractFromJsonLd = ($) => {
 };
 
 const extractJobDetail = ($, url) => {
+    // Try JSON-LD first for reliable structured data
     const jsonLd = extractFromJsonLd($);
 
-    // --- Title & company ---
-    // Title: Use specific Computrabajo class
-    const title = pickFirstNonEmpty(
-        jsonLd.title,
-        $('.title_offer.fs21.fwB.lh1_2').first().text(),
-        $('h1, .box_title h1, [class*="title"]').first().text(),
-    );
+    // ========== TITLE ==========
+    // Priority: JSON-LD > .title_offer class > h1 fallback
+    let title = null;
+    if (jsonLd.title) {
+        title = normText(jsonLd.title);
+    }
+    if (!title) {
+        // Exact class from Computrabajo
+        const titleEl = $('.title_offer.fs21.fwB.lh1_2');
+        if (titleEl.length) {
+            title = normText(titleEl.text());
+        }
+    }
+    if (!title) {
+        // Fallback to any h1
+        const h1 = $('h1').first();
+        if (h1.length) {
+            title = normText(h1.text());
+        }
+    }
 
-    // Company: Use specific Computrabajo class, fallback to other methods
-    let company = jsonLd.company 
-        || $('a.dIB.mr10').first().text()
-        || pickCompanyFromDom($);
-    company = cleanCompanyName(company);
+    // ========== COMPANY ==========
+    // Priority: JSON-LD > .dIB.mr10 link > pickCompanyFromDom > microdata
+    let company = null;
+    if (jsonLd.company) {
+        company = cleanCompanyName(jsonLd.company);
+    }
+    if (!company) {
+        // Exact class from Computrabajo (company link in header)
+        const companyLink = $('a.dIB.mr10');
+        if (companyLink.length) {
+            company = cleanCompanyName(companyLink.text());
+        }
+    }
+    if (!company) {
+        // Try other company selectors
+        company = pickCompanyFromDom($);
+    }
+    if (!company) {
+        // Try microdata
+        const microCompany = $('[itemprop="hiringOrganization"] [itemprop="name"]').first();
+        if (microCompany.length) {
+            company = cleanCompanyName(microCompany.text());
+        }
+    }
 
-    // --- Location ---
-    let location = pickLocation($,
-        $('.fs16.mb5').first().text()
-        || $('.box_header p, [class*="location"], nav.breadcrumb').first().text()
-    );
+    // ========== LOCATION ==========
+    // Priority: JSON-LD > .fs16.mb5 > pickLocation > microdata > breadcrumb
+    let location = null;
+    if (jsonLd.location) {
+        location = normText(jsonLd.location);
+    }
+    if (!location) {
+        // Exact class from Computrabajo
+        const locEl = $('.fs16.mb5');
+        if (locEl.length) {
+            let locText = normText(locEl.text());
+            // Clean up location text (remove extra info)
+            locText = locText.replace(/\s*-\s*Publicado.*$/i, '').replace(/Ver mapa/gi, '').trim();
+            if (locText) location = locText;
+        }
+    }
+    if (!location) {
+        // Try pickLocation helper
+        location = pickLocation($, $('.box_header p').first().text());
+    }
+    if (!location) {
+        // Try microdata
+        const microLoc = $('[itemprop="jobLocation"] [itemprop="addressLocality"]').first();
+        if (microLoc.length) {
+            location = normText(microLoc.text());
+        }
+    }
 
-    // --- Salary ---
+    // ========== DATE POSTED ==========
+    // Priority: JSON-LD > .fc_aux.fs13.mtB > extractLabeledValue
+    let datePosted = null;
+    if (jsonLd.datePosted) {
+        datePosted = jsonLd.datePosted;
+    }
+    if (!datePosted) {
+        // Exact class from Computrabajo
+        const dateEl = $('.fc_aux.fs13.mtB');
+        if (dateEl.length) {
+            const dateText = normText(dateEl.text());
+            // Try to parse relative date (e.g., "hace 2 días")
+            const iso = parseSpanishRelativeDateToISO(dateText);
+            datePosted = iso || dateText;
+        }
+    }
+    if (!datePosted) {
+        // Try labeled value extraction
+        const rel = extractLabeledValue($, [/publicado/i, /publicada/i, /fecha/i]);
+        if (rel) {
+            const iso = parseSpanishRelativeDateToISO(rel);
+            datePosted = iso || rel;
+        }
+    }
+
+    // ========== EMPLOYMENT TYPE ==========
+    // Priority: JSON-LD > .dFlex.mb10 > extractLabeledValue
+    let employmentType = null;
+    if (jsonLd.employmentType) {
+        employmentType = Array.isArray(jsonLd.employmentType) 
+            ? jsonLd.employmentType.filter(Boolean).join(', ')
+            : jsonLd.employmentType;
+    }
+    if (!employmentType) {
+        // Exact class from Computrabajo
+        const typeEl = $('.dFlex.mb10');
+        if (typeEl.length) {
+            // This element may contain multiple spans; extract all text
+            let typeText = normText(typeEl.text());
+            // Clean up (remove labels like "Jornada:")
+            typeText = typeText.replace(/^(Jornada|Tipo de contrato|Modalidad):\s*/i, '').trim();
+            if (typeText) employmentType = typeText;
+        }
+    }
+    if (!employmentType) {
+        // Try labeled extraction
+        const jornada = extractLabeledValue($, [/jornada/i, /tipo de contrato/i, /modalidad/i]);
+        if (jornada) employmentType = jornada;
+    }
+
+    // ========== SALARY ==========
+    // Priority: JSON-LD structured > extractLabeledValue
     let salary_struct = jsonLd.salary_struct || null;
     let salary_text = null;
     if (!salary_struct) {
-        const scraped = extractLabeledValue($, [/salario/i, /sueldo/i, /compensaci[oó]n/i]);
-        if (scraped) salary_text = normText(scraped);
-    }
-
-    // --- Employment type ---
-    // Use specific Computrabajo class for employment type
-    let employmentType = jsonLd.employmentType || null;
-    if (!employmentType) {
-        const dFlexText = $('.dFlex.mb10').first().text();
-        if (dFlexText) {
-            employmentType = normText(dFlexText);
-        } else {
-            const tipoContrato = extractLabeledValue($, [/tipo de contrato/i, /contrato/i]);
-            const jornada = extractLabeledValue($, [/jornada/i, /horario/i, /modalidad/i]);
-            const types = [tipoContrato, jornada].map(normText).filter(Boolean);
-            if (types.length) employmentType = Array.from(new Set(types));
+        const scraped = extractLabeledValue($, [/salario/i, /sueldo/i, /compensaci[oó]n/i, /remuneraci[oó]n/i]);
+        if (scraped) {
+            salary_text = normText(scraped);
         }
     }
 
-    // --- Date posted ---
-    // Use specific Computrabajo class for date posted
-    let datePosted = jsonLd.datePosted || null;
-    if (!datePosted) {
-        const dateText = $('.fc_aux.fs13.mtB').first().text();
-        if (dateText) {
-            const iso = parseSpanishRelativeDateToISO(dateText);
-            datePosted = iso || normText(dateText) || null;
-        } else {
-            const rel = extractLabeledValue($, [/publicado/i, /fecha de publicaci[oó]n/i]);
-            const iso = parseSpanishRelativeDateToISO(rel);
-            datePosted = iso || null;
-        }
-    }
-
-    // --- Description ---
-    // Use specific Computrabajo class for description, keep HTML formatting
+    // ========== DESCRIPTION ==========
+    // Priority: JSON-LD > .fs16.t_word_wrap > pickDescriptionHtml
     let description_html = null;
     let description_text = null;
 
@@ -425,24 +503,40 @@ const extractJobDetail = ($, url) => {
             description_text = cleanHtmlToText(sanitized);
         }
     }
+    
     if (!description_html) {
-        // Try specific class first
-        let descEl = $('.fs16.t_word_wrap').first();
-        let html = descEl.length ? descEl.html() : null;
-        
-        if (!html) {
-            html = pickDescriptionHtml($);
+        // Exact class from Computrabajo
+        const descEl = $('.fs16.t_word_wrap');
+        if (descEl.length) {
+            let html = descEl.html();
+            if (html) {
+                // Remove hidden/unwanted elements
+                const $temp = cheerioLoad(html);
+                $temp('.hide, [data-offers-grid-detail-container-error], [data-complaint-overlay], .popup, #complaint-popup-container, [aria-hidden="true"]').remove();
+                $temp('script, style, noscript').remove();
+                
+                description_html = stripAttrsKeepTags($temp.root().html());
+                description_text = cleanHtmlToText(description_html);
+            }
         }
-        
+    }
+    
+    if (!description_html) {
+        // Fallback to pickDescriptionHtml
+        const html = pickDescriptionHtml($);
         if (html) {
-            // Remove hidden elements and popups
-            const $ = cheerioLoad(html);
-            $('[data-offers-grid-detail-container-error], .hide, [data-complaint-overlay], .popup, #complaint-popup-container').remove();
-            description_html = $.root().html();
-            description_text = cleanHtmlToText(description_html);
+            description_html = html;
+            description_text = cleanHtmlToText(html);
         }
     }
 
+    // Guard: CSS-only capture (malformed HTML)
+    if (description_html && /{.*}/.test(description_html) && !/<(p|ul|li|a|strong|em|br|h3|h4)/i.test(description_html)) {
+        description_html = null;
+        description_text = null;
+    }
+
+    // ========== BUILD JOB OBJECT ==========
     const job = {
         url,
         source: 'computrabajo.com',
@@ -455,13 +549,11 @@ const extractJobDetail = ($, url) => {
         employmentType: employmentType || null,
     };
 
-    if (salary_struct) Object.assign(job, salary_struct);
-    else if (salary_text) job.salary_text = salary_text;
-
-    // Guard: CSS-only capture
-    if (job.description_html && /{.*}/.test(job.description_html) && !/<(p|ul|li|a|strong|em|br|h3|h4)/i.test(job.description_html)) {
-        job.description_html = null;
-        job.description_text = null;
+    // Add salary fields
+    if (salary_struct) {
+        Object.assign(job, salary_struct);
+    } else if (salary_text) {
+        job.salary_text = salary_text;
     }
 
     return job;
@@ -524,17 +616,37 @@ router.addDefaultHandler(async ({ $, request, log, enqueueLinks }) => {
     const isDetail = /\/oferta-|\/job\/|\/empleo\/|\/vacante\//i.test(request.url);
 
     if (isDetail) {
-        log.info(`Detail page: ${request.url}`);
+        // Skip if limit reached
+        if (totalJobsSaved >= maxResultsDesired) {
+            log.info(`✓ Limit reached (${totalJobsSaved}/${maxResultsDesired}), skipping ${request.url}`);
+            return;
+        }
+
+        log.info(`[DETAIL] Processing: ${request.url}`);
         const job = extractJobDetail($, request.url);
+        
+        // Validate job data quality before saving
         if (job && job.title) {
             await Dataset.pushData(job);
             totalJobsSaved++;
-            log.info(`[${totalJobsSaved}/${maxResultsDesired}] Saved: ${job.title}`);
+            log.info(`✓ [${totalJobsSaved}/${maxResultsDesired}] Saved: "${job.title}" @ ${job.company || 'N/A'}`);
+            
+            // Log data quality info
+            const fields = [];
+            if (job.company) fields.push('company');
+            if (job.location) fields.push('location');
+            if (job.datePosted) fields.push('date');
+            if (job.employmentType) fields.push('type');
+            if (job.salary_text || job.salary_amount) fields.push('salary');
+            if (job.description_text) fields.push('desc');
+            log.info(`  Fields: [${fields.join(', ')}]`);
+        } else {
+            log.warning(`✗ No valid title found for ${request.url}, skipping`);
         }
         return;
     }
 
-    log.info(`Listing page: ${request.url} (${totalJobsSaved}/${maxResultsDesired} saved)`);
+    log.info(`[LIST] Processing: ${request.url} (${totalJobsSaved}/${maxResultsDesired} saved)`);
 
     // Only enqueue more detail links if we haven't reached the limit
     if (totalJobsSaved < maxResultsDesired) {
@@ -564,26 +676,42 @@ router.addDefaultHandler(async ({ $, request, log, enqueueLinks }) => {
         // Pagination - but only if we still need more results
         if (totalJobsSaved < maxResultsDesired) {
             await enqueueLinks({
-                selector: 'a[href*="page="], .pagination a, a.next, a[rel="next"]',
+                selector: 'a[href*="page="], .pagination a, a.next, a[rel="next"], a.js-o-pager.next',
                 forefront: false,
             });
         }
+    } else {
+        log.info(`✓ Target reached (${totalJobsSaved}/${maxResultsDesired}), stopping pagination`);
     }
 });
 
 router.addHandler('DETAIL', async ({ $, request, log }) => {
     // Skip if we've already saved enough
     if (totalJobsSaved >= maxResultsDesired) {
-        log.info(`Limit reached (${totalJobsSaved}/${maxResultsDesired}), skipping ${request.url}`);
+        log.info(`✓ Limit reached (${totalJobsSaved}/${maxResultsDesired}), skipping ${request.url}`);
         return;
     }
 
-    log.info(`Detail (labeled) page: ${request.url}`);
+    log.info(`[DETAIL-LABELED] Processing: ${request.url}`);
     const job = extractJobDetail($, request.url);
+    
+    // Validate job data quality before saving
     if (job && job.title) {
         await Dataset.pushData(job);
         totalJobsSaved++;
-        log.info(`[${totalJobsSaved}/${maxResultsDesired}] Saved: ${job.title}`);
+        log.info(`✓ [${totalJobsSaved}/${maxResultsDesired}] Saved: "${job.title}" @ ${job.company || 'N/A'}`);
+        
+        // Log data quality info
+        const fields = [];
+        if (job.company) fields.push('company');
+        if (job.location) fields.push('location');
+        if (job.datePosted) fields.push('date');
+        if (job.employmentType) fields.push('type');
+        if (job.salary_text || job.salary_amount) fields.push('salary');
+        if (job.description_text) fields.push('desc');
+        log.info(`  Fields: [${fields.join(', ')}]`);
+    } else {
+        log.warning(`✗ No valid title found for ${request.url}, skipping`);
     }
 });
 
